@@ -1,5 +1,8 @@
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
+#import <objc/runtime.h>
+#import <string.h>
+#import <stdlib.h>
 #import "fishhook/fishhook.h"
 #import "Utilities/Button/BeaButton.h"
 #import "BeFake/TokenManager/BeaTokenManager.h"

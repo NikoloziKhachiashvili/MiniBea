@@ -160,6 +160,37 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 %end
 %end
 
+// TEMPORARY - the previous attempt (guessing "SwiftUI.UIHostingController"/
+// "UIHostingController" and waiting via dyld image callbacks) never resolved
+// at all, silently, across an entire test session - no log ever fired,
+// meaning it's not just a wrong name, the guess never became true. Rather
+// than guess a third name, ask the runtime directly what's actually loaded.
+static NSInteger BeaClassScansRemaining = 3;
+
+void BeaLogAllHostingClasses(void) {
+	int numClasses = objc_getClassList(NULL, 0);
+	if (numClasses <= 0) {
+		NSLog(@"[Bea][diag] objc_getClassList reported 0 classes");
+		return;
+	}
+
+	Class *classes = (Class *)malloc(sizeof(Class) * (unsigned long)numClasses);
+	if (!classes) return;
+	numClasses = objc_getClassList(classes, numClasses);
+
+	NSInteger found = 0;
+	for (int i = 0; i < numClasses; i++) {
+		const char *name = class_getName(classes[i]);
+		if (name && strstr(name, "Hosting")) {
+			NSLog(@"[Bea][diag] Loaded class matching *Hosting*: %s (superclass: %@)",
+				name, NSStringFromClass(class_getSuperclass(classes[i])));
+			found++;
+		}
+	}
+	NSLog(@"[Bea][diag] Scanned %d loaded classes, %ld matched *Hosting*", numClasses, (long)found);
+	free(classes);
+}
+
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
@@ -170,6 +201,18 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
         }
     }
     %orig;
+}
+
+// TEMPORARY - see BeaLogAllHostingClasses above. viewDidAppear: fires on
+// every screen transition, so by the third one plenty of the app (including
+// whatever the feed uses) should be loaded.
+- (void)viewDidAppear:(BOOL)animated {
+	%orig;
+	if (BeaClassScansRemaining > 0) {
+		BeaClassScansRemaining--;
+		NSLog(@"[Bea][diag] viewDidAppear on %@ - scanning loaded classes", NSStringFromClass([self class]));
+		BeaLogAllHostingClasses();
+	}
 }
 %end
 
@@ -241,8 +284,16 @@ BOOL isBlockedPath(const char *path) {
 // already loaded at registration time, then again for every future image
 // load, so this catches SwiftUI whether it's loaded before or after us.
 static BOOL BeaHostingControllerHooked = NO;
+static NSInteger BeaImageCallbackCount = 0;
 
 void BeaTryHookUIHostingController(const struct mach_header *mh, intptr_t vmaddr_slide) {
+	// TEMPORARY - confirms the callback is actually firing at all, since last
+	// time neither the success nor a (missing) failure log ever appeared.
+	BeaImageCallbackCount++;
+	if (BeaImageCallbackCount == 1 || BeaImageCallbackCount % 50 == 0) {
+		NSLog(@"[Bea][diag] dyld add-image callback invocation #%ld", (long)BeaImageCallbackCount);
+	}
+
 	if (BeaHostingControllerHooked) return;
 
 	Class hostingController = objc_getClass("SwiftUI.UIHostingController");
@@ -255,7 +306,7 @@ void BeaTryHookUIHostingController(const struct mach_header *mh, intptr_t vmaddr
 
 	BeaHostingControllerHooked = YES;
 	// TEMPORARY - see BeaLogViewHierarchy above.
-	NSLog(@"[Bea][diag] UIHostingController resolved via %@ (image load callback): %@", resolvedVia, hostingController);
+	NSLog(@"[Bea][diag] UIHostingController resolved via %@ (image load callback #%ld): %@", resolvedVia, (long)BeaImageCallbackCount, hostingController);
 
 	%init(BeaSwiftUIGroup, UIHostingController = hostingController);
 }
