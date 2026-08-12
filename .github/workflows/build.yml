@@ -23,6 +23,13 @@ jobs:
       # https://github.com/beerpiss/theos-action, pinned to the v1.7.0 tag's commit
       - name: Prepare Theos
         uses: beerpiss/theos-action@e27e8335ec3777c2daabedec89a9178b1d4e70c0 # v1.7.0
+        with:
+          # The Makefile targets iPhoneOS18.0.sdk (TARGET := iphone:clang:18.0:14.0),
+          # but the default theos/sdks repo only goes up to 16.5. xybp888/iOS-SDKs
+          # mirrors newer SDKs including 18.0; pinned to a commit for the same
+          # reason as the action above.
+          theos-sdks: https://github.com/xybp888/iOS-SDKs
+          theos-sdks-ref: 1b92ff4a8928f582876e1d388d1381c6a0c59eb9
 
       - name: Build jailed package (sideload-injectable)
         run: |
