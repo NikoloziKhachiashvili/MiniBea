@@ -86,10 +86,18 @@
 // class. The >=400pt width filter in qualifyingImageViewsInView: is what
 // keeps this scoped to actual BeReal photos rather than firing on every
 // screen in the app (settings, profile, camera, etc. all reach this too).
-%hook UIViewController
-%property (nonatomic, strong) BeaButton *downloadButton;
-%property (nonatomic, strong) UIView *downloadButtonAnchor;
+//
+// %property doesn't work here the way it did for MediaView/UIHostingController
+// stubs: those were classes *we* declared via a stub @interface in Tweak.h, so
+// Logos's generated accessors matched a real (if fake) interface. UIViewController
+// is Apple's own already-fully-declared SDK class, and the compiler rejects
+// calling selectors it never declared ("no visible @interface... declares the
+// selector"). Associated objects via the plain runtime API sidestep this
+// entirely - no property/interface declaration needed at all.
+static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
+static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
+%hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
     if ([viewControllerToPresent isKindOfClass:[UIAlertController class]]) {
@@ -107,17 +115,21 @@
 	UIView *root = [self view];
 	if (!root) return;
 
+	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
+	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
+
 	// Content can get replaced/rebuilt under a given controller (e.g. cell/
 	// controller reuse, or navigating to different content). If the image
 	// view we last anchored to is no longer part of this controller's view,
 	// tear down and re-attach against what's showing now.
-	if ([self downloadButton] && (![self downloadButtonAnchor] || ![[self downloadButtonAnchor] isDescendantOfView:root])) {
-		[[self downloadButton] removeFromSuperview];
-		[self setDownloadButton:nil];
-		[self setDownloadButtonAnchor:nil];
+	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root])) {
+		[existingButton removeFromSuperview];
+		objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		existingButton = nil;
 	}
 
-	if ([self downloadButton]) return;
+	if (existingButton) return;
 
 	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:root].firstObject;
 	if (!anchor) return;
@@ -125,8 +137,8 @@
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
 
-	[self setDownloadButton:downloadButton];
-	[self setDownloadButtonAnchor:anchor];
+	objc_setAssociatedObject(self, BeaDownloadButtonKey, downloadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	[root addSubview:downloadButton];
 
 	[NSLayoutConstraint activateConstraints:@[
