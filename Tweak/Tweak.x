@@ -74,6 +74,24 @@
 }
 %end
 
+// TEMPORARY diagnostics for tracking down why the download button isn't
+// appearing - the current BeReal build's view hierarchy can't be inspected
+// without a live device, so this substitutes for a debugger/view hierarchy
+// dump. Remove once POVPostHostingCollectionViewCell's actual subview
+// structure is confirmed and the button reliably appears.
+static NSInteger BeaDiagHierarchyDumpsRemaining = 5;
+
+void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
+	NSMutableString *indent = [NSMutableString string];
+	for (NSInteger i = 0; i < depth; i++) [indent appendString:@"  "];
+	NSLog(@"[Bea][diag]%@%@ frame=%@ hidden=%d alpha=%.2f isImageView=%d",
+		indent, NSStringFromClass([view class]), NSStringFromCGRect(view.frame),
+		view.hidden, view.alpha, [view isKindOfClass:[UIImageView class]]);
+	for (UIView *subview in view.subviews) {
+		BeaLogViewHierarchy(subview, depth + 1);
+	}
+}
+
 %hook POVPostHostingCollectionViewCell
 %property (nonatomic, strong) BeaButton *downloadButton;
 %property (nonatomic, strong) UIView *downloadButtonAnchor;
@@ -98,7 +116,18 @@
 	// own edges - we don't know what else (captions, header, buttons) BeReal
 	// lays out around it, but we do know where the photo itself ends up.
 	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:self].firstObject;
-	if (!anchor) return;
+
+	if (!anchor) {
+		if (BeaDiagHierarchyDumpsRemaining > 0) {
+			BeaDiagHierarchyDumpsRemaining--;
+			NSLog(@"[Bea][diag] layoutSubviews fired on %@ (subviews=%lu) but found no qualifying UIImageView. Dumping hierarchy:",
+				NSStringFromClass([self class]), (unsigned long)self.subviews.count);
+			BeaLogViewHierarchy(self, 0);
+		}
+		return;
+	}
+
+	NSLog(@"[Bea][diag] Anchoring download button to %@ frame=%@", NSStringFromClass([anchor class]), NSStringFromCGRect(anchor.frame));
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
@@ -192,7 +221,17 @@ BOOL isBlockedPath(const char *path) {
 	// particular class wasn't qualified - cheap, and %init just no-ops a
 	// hook group whose class resolves to Nil rather than crashing.
 	Class povPostCell = objc_getClass("FeaturePOVPresentation.POVPostHostingCollectionViewCell");
-	if (!povPostCell) povPostCell = objc_getClass("POVPostHostingCollectionViewCell");
+	NSString *resolvedVia = @"qualified name";
+	if (!povPostCell) {
+		povPostCell = objc_getClass("POVPostHostingCollectionViewCell");
+		resolvedVia = @"bare name";
+	}
+	// TEMPORARY - see BeaLogViewHierarchy above.
+	if (povPostCell) {
+		NSLog(@"[Bea][diag] POVPostHostingCollectionViewCell resolved via %@: %@", resolvedVia, povPostCell);
+	} else {
+		NSLog(@"[Bea][diag] POVPostHostingCollectionViewCell FAILED to resolve via either name - the download button hook will never install.");
+	}
 
 	%init(
 	  POVPostHostingCollectionViewCell = povPostCell,
