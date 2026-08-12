@@ -188,33 +188,48 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 	return NO;
 }
 
-+ (void)collectGatingLabelsInView:(UIView *)view result:(NSMutableArray<UILabel *> *)result {
-	if ([view isKindOfClass:[UILabel class]]) {
-		UILabel *label = (UILabel *)view;
-		NSString *text = label.text.lowercaseString;
-		// Matched on the specific gating copy, not a generic fragment like
-		// "to view" - that alone turned out to also match unrelated text
-		// elsewhere (e.g. auto-generated accessibility hints such as "...tap
-		// to view..." on nav bar icons), hiding things nowhere near the
-		// actual lock overlay.
-		if ([text containsString:@"post to view"] || [text containsString:@"share yours with them"]) {
-			[result addObject:label];
-		}
++ (BOOL)text:(NSString *)text matchesGatingCopy:(BOOL)requireBoth {
+	if (text.length == 0) return NO;
+	BOOL hasTitle = [text containsString:@"post to view"];
+	BOOL hasBody = [text containsString:@"share yours with them"];
+	return requireBoth ? (hasTitle && hasBody) : (hasTitle || hasBody);
+}
+
++ (void)collectGatingMarkersInView:(UIView *)view result:(NSMutableArray<UIView *> *)result {
+	// Matched on the specific gating copy, not a generic fragment like
+	// "to view" - that alone also matched unrelated text elsewhere (most
+	// likely an auto-generated accessibility hint on a nav bar icon), hiding
+	// things nowhere near the actual lock overlay. Checked via
+	// accessibilityLabel as well as UILabel.text - a first attempt matching
+	// UILabel.text alone found nothing at all, which points at BeReal's
+	// SwiftUI Text not bridging to a real UILabel instance the way
+	// UIHostingController itself never bridges to a plain class (see the
+	// comment above the UIViewController hook) - accessibility metadata is
+	// far more likely to survive that regardless of the underlying class.
+	NSString *accessibilityText = view.accessibilityLabel.lowercaseString;
+	NSString *labelText = [view isKindOfClass:[UILabel class]] ? ((UILabel *)view).text.lowercaseString : nil;
+	if ([self text:accessibilityText matchesGatingCopy:NO] || [self text:labelText matchesGatingCopy:NO]) {
+		[result addObject:view];
 	}
 	for (UIView *subview in view.subviews) {
-		[self collectGatingLabelsInView:subview result:result];
+		[self collectGatingMarkersInView:subview result:result];
 	}
 }
 
 + (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
-	NSMutableArray<UILabel *> *labels = [NSMutableArray array];
-	[self collectGatingLabelsInView:root result:labels];
-	if (labels.count == 0) return;
+	NSMutableArray<UIView *> *markers = [NSMutableArray array];
+	[self collectGatingMarkersInView:root result:markers];
+	os_log(OS_LOG_DEFAULT, "[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
+	if (markers.count == 0) return;
 
-	for (UILabel *label in labels) {
-		os_log(OS_LOG_DEFAULT, "[Bea] gating label matched: %{public}@", label.text);
+	for (UIView *marker in markers) {
+		os_log(OS_LOG_DEFAULT, "[Bea] gating marker: class=%{public}@ a11yLabel=%{public}@", NSStringFromClass([marker class]), marker.accessibilityLabel);
 
-		UIView *candidate = label.superview;
+		// Walk up from (and including) the matched view itself - SwiftUI
+		// commonly combines an entire overlay's icon+text+button into one
+		// accessibility element, so the match may already be the whole
+		// overlay with nothing left to widen to.
+		UIView *candidate = marker;
 		UIView *overlay = nil;
 		NSInteger levelsWalked = 0;
 
@@ -227,28 +242,23 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 				}
 			}
 
-			if (!containsPhoto && [self viewOrDescendantIsButtonLike:candidate]) {
-				overlay = candidate;
-				break;
-			}
-
-			// Any wider ancestor will still contain the photo too - there's
-			// no scope above this point that has the overlay's controls
-			// without the actual post content, so stop widening.
+			// Any wider ancestor will still contain the photo too - keep
+			// whatever the last safe candidate was and stop widening.
 			if (containsPhoto) break;
+
+			overlay = candidate;
+
+			// This candidate is already a complete, self-contained control -
+			// stop here rather than risk widening into an unrelated sibling.
+			if ([self viewOrDescendantIsButtonLike:candidate]) break;
 
 			candidate = candidate.superview;
 			levelsWalked++;
 		}
 
-		if (overlay) {
-			os_log(OS_LOG_DEFAULT, "[Bea] hiding gating overlay container %{public}@ (%d levels up)", overlay, (int)levelsWalked);
+		if (overlay && !overlay.hidden) {
+			os_log(OS_LOG_DEFAULT, "[Bea] hiding gating overlay %{public}@ (%d levels up from marker)", overlay, (int)levelsWalked);
 			overlay.hidden = YES;
-		} else if (!label.hidden) {
-			// No safely-scoped container found - at minimum hide the label
-			// itself so its text stops covering the photo.
-			os_log(OS_LOG_DEFAULT, "[Bea] no safe overlay container found within 10 levels, hiding label only");
-			label.hidden = YES;
 		}
 	}
 }
