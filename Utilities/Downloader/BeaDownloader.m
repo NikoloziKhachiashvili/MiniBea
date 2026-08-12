@@ -39,6 +39,13 @@
 	}
 }
 
++ (BOOL)isViewOnScreen:(UIView *)view {
+	UIWindow *window = view.window;
+	if (!window) return NO;
+	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+	return CGRectIntersectsRect(frameInWindow, window.bounds);
+}
+
 + (NSArray<UIImageView *> *)qualifyingImageViewsInView:(UIView *)root {
 	NSMutableArray<UIImageView *> *candidates = [NSMutableArray array];
 	[self collectImageViewsInView:root result:candidates];
@@ -55,10 +62,7 @@
 	// next to the one tapped.
 	NSMutableArray<UIImageView *> *onScreen = [NSMutableArray array];
 	for (UIImageView *imageView in candidates) {
-		UIWindow *window = imageView.window;
-		if (!window) continue;
-		CGRect frameInWindow = [imageView convertRect:imageView.bounds toView:nil];
-		if (CGRectIntersectsRect(frameInWindow, window.bounds)) {
+		if ([self isViewOnScreen:imageView]) {
 			[onScreen addObject:imageView];
 		}
 	}

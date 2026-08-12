@@ -16,4 +16,9 @@
 // scoped to - anything wider can pick up a neighboring post's photo instead
 // of this post's own second (usually much smaller) camera.
 + (UIView *)localContainerForAnchor:(UIView *)anchor upToRoot:(UIView *)root;
+// Whether view's frame currently intersects its own window's bounds. Used to
+// tell a scrolled-away anchor apart from one that's still genuinely visible -
+// isDescendantOfView: alone stays true long after a post has scrolled off
+// screen, until BeReal's own view recycling actually tears it down.
++ (BOOL)isViewOnScreen:(UIView *)view;
 @end

@@ -119,10 +119,12 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
 
 	// Content can get replaced/rebuilt under a given controller (e.g. cell/
-	// controller reuse, or navigating to different content). If the image
-	// view we last anchored to is no longer part of this controller's view,
-	// tear down and re-attach against what's showing now.
-	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root])) {
+	// controller reuse, or navigating to different content). isDescendantOfView:
+	// alone isn't enough - a scrolled-away post stays in the hierarchy (just
+	// off-screen) until BeReal's own view recycling actually tears it down, so
+	// the button would otherwise stick to the previous post long after it's
+	// scrolled away. Also require the anchor to still be genuinely on-screen.
+	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root] || ![BeaDownloader isViewOnScreen:existingAnchor])) {
 		[existingButton removeFromSuperview];
 		objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
