@@ -49,7 +49,18 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 	UIWindow *window = view.window;
 	if (!window) return NO;
 	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
-	return CGRectIntersectsRect(frameInWindow, window.bounds);
+	if (!CGRectIntersectsRect(frameInWindow, window.bounds)) return NO;
+
+	// Intersecting the window at all isn't enough on its own - the "swipe
+	// down for a grid of everyone's BeReals" view reuses the same kind of
+	// full-resolution image views the single-post feed does, just displayed
+	// as small thumbnails, and small always-present chrome elsewhere (nav
+	// icons, etc.) can otherwise also intersect trivially. Require the
+	// on-screen portion to actually be displayed at close to full post
+	// width - true for the single-post feed this button targets, false for
+	// grid thumbnails and anything chrome-sized.
+	CGRect intersection = CGRectIntersection(frameInWindow, window.bounds);
+	return intersection.size.width >= window.bounds.size.width * 0.6;
 }
 
 + (NSArray<UIImageView *> *)qualifyingImageViewsInView:(UIView *)root {
