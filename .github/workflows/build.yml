@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # This repo can't be compiled on the Windows dev machine, so CI is the
+    # only place that verifies it builds. Runs on Linux (theos-action
+    # supports it, and it's faster to boot than a macOS runner); the repo is
+    # public so Actions minutes are free on either.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sets THEOS in $GITHUB_ENV for later steps.
+      # https://github.com/beerpiss/theos-action
+      - name: Prepare Theos
+        uses: beerpiss/theos-action@main
+
+      - name: Build jailed package (sideload-injectable)
+        run: |
+          rm -f packages/*.deb
+          make clean package FINALPACKAGE=1 JAILED=1
+
+      - name: Rename jailed deb
+        run: |
+          JAILED_DEB_FILE=$(find ./packages -name "*.deb" -type f)
+          if [ -n "$JAILED_DEB_FILE" ]; then
+            mv "$JAILED_DEB_FILE" "${JAILED_DEB_FILE%.deb}_jailed.deb"
+          else
+            echo "::error::No jailed .deb produced"
+            exit 1
+          fi
+
+      - name: Build rootful package
+        run: make clean package FINALPACKAGE=1
+
+      - name: Build rootless package
+        run: make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      # No IPA is built or uploaded here - that step needs a decrypted BeReal
+      # IPA, which must never be committed or sent to GitHub. Injecting the
+      # jailed .deb into an IPA happens locally (e.g. with Sideloadly).
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: minibea-packages
+          path: packages/*.deb
+          if-no-files-found: error

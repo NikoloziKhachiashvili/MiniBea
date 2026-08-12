@@ -1,63 +1,170 @@
 #import "BeaDownloader.h"
 
+// Tracks an in-flight save of one BeReal's images (front + back) so the
+// checkmark/re-enable only fires once, after every image has finished saving.
+@interface BeaDownloadContext : NSObject
+@property (nonatomic, weak) UIButton *button;
+@property (nonatomic, assign) NSInteger remaining;
+@property (nonatomic, assign) BOOL failed;
+@end
+
+@implementation BeaDownloadContext
+@end
+
 @implementation BeaDownloader
 + (void)downloadImage:(id)sender {
 	UIButton *button = (UIButton *)sender;
-	UIImageView *imageView = nil;
+	UIView *root = button.superview;
+	if (!root) return;
 
-    UIView *superview = button.superview;
+	NSMutableArray<UIImageView *> *candidates = [NSMutableArray array];
+	[self collectImageViewsInView:root result:candidates];
 
-    NSMutableArray *foundImageViews = [NSMutableArray array];
-    UIView *root = superview.subviews.firstObject.subviews.firstObject;
+	if (candidates.count == 0) return;
 
-    [self findViewsOfClass:@"SDAnimatedImageView" inView:root result:foundImageViews];
+	// Process visible views before hidden ones so dedupe keeps the copy with
+	// meaningful on-screen geometry (BeReal keeps a hidden copy of whichever
+	// image isn't currently the large frame).
+	NSMutableArray<UIImageView *> *visible = [NSMutableArray array];
+	NSMutableArray<UIImageView *> *hidden = [NSMutableArray array];
+	for (UIImageView *imageView in candidates) {
+		if ([self isView:imageView visibleWithinRoot:root]) {
+			[visible addObject:imageView];
+		} else {
+			[hidden addObject:imageView];
+		}
+	}
 
-    imageView = foundImageViews.firstObject;
+	NSMutableArray<UIImageView *> *ordered = [NSMutableArray arrayWithArray:visible];
+	[ordered addObjectsFromArray:hidden];
 
-	if (imageView) {
-		UIImage *imageToSave = imageView.image;
-		UIImageWriteToSavedPhotosAlbum(imageToSave, self, @selector(image:didFinishSavingWithError:contextInfo:), (__bridge void *)button);
+	NSMutableSet *seenKeys = [NSMutableSet set];
+	NSMutableArray<UIImageView *> *uniqueImageViews = [NSMutableArray array];
+	for (UIImageView *imageView in ordered) {
+		id key = [self dedupeKeyForImageView:imageView];
+		if ([seenKeys containsObject:key]) continue;
+		[seenKeys addObject:key];
+		[uniqueImageViews addObject:imageView];
+	}
+
+	// Largest displayed frame first (back camera in the normal, un-swapped
+	// state), capped at 2 since a BeReal is exactly two photos.
+	NSArray<UIImageView *> *sorted = [uniqueImageViews sortedArrayUsingComparator:^NSComparisonResult(UIImageView *a, UIImageView *b) {
+		CGRect frameA = [a convertRect:a.bounds toView:nil];
+		CGRect frameB = [b convertRect:b.bounds toView:nil];
+		CGFloat areaA = frameA.size.width * frameA.size.height;
+		CGFloat areaB = frameB.size.width * frameB.size.height;
+		if (areaA > areaB) return NSOrderedAscending;
+		if (areaA < areaB) return NSOrderedDescending;
+		return NSOrderedSame;
+	}];
+
+	NSUInteger saveCount = MIN(sorted.count, (NSUInteger)2);
+	if (saveCount == 0) return;
+
+	NSArray<UIImageView *> *toSave = [sorted subarrayWithRange:NSMakeRange(0, saveCount)];
+
+	button.enabled = NO;
+
+	BeaDownloadContext *context = [BeaDownloadContext new];
+	context.button = button;
+	context.remaining = toSave.count;
+	context.failed = NO;
+
+	for (UIImageView *imageView in toSave) {
+		void *contextInfo = (void *)CFBridgingRetain(context);
+		UIImageWriteToSavedPhotosAlbum(imageView.image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
 	}
 }
 
-+ (void)findViewsOfClass:(NSString *)className inView:(UIView *)view result:(NSMutableArray *)result {
-    // Check if this view is of the target class
-    if ([[[view class] description] isEqualToString:className]) {
-        [result addObject:view];
-    }
++ (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {
+	// Deliberately does not prune hidden/zero-alpha subtrees here (unlike the
+	// old class-name-based search) - the front camera's image view may live in
+	// one of those, and we need it collected so it can be saved too.
+	if ([view isKindOfClass:[UIImageView class]]) {
+		UIImageView *imageView = (UIImageView *)view;
+		// BeReal photos are ~1500x2000; this filters out avatars, reaction
+		// thumbnails, and the download button's own SF Symbol image view.
+		if (imageView.image && imageView.image.size.width >= 400) {
+			[result addObject:imageView];
+		}
+	}
 
-    // since we have a DoubleMediaView, there are two SDAnimatedImageViews but only one is visible at a time
-    // since the SDAnimatedImageView doesn't get hidden but instead their parent's parent's parent superview
-    // we need to check if the view is hidden and if it is, we don't need to check its subviews
-    if ([view alpha] == 0) {
-        return;
-    }
-    // Recursively check all subviews
-    for (UIView *subview in view.subviews) {
-        [self findViewsOfClass:className inView:subview result:result];
-    }
+	for (UIView *subview in view.subviews) {
+		[self collectImageViewsInView:subview result:result];
+	}
+}
+
++ (BOOL)isView:(UIView *)view visibleWithinRoot:(UIView *)root {
+	UIView *current = view;
+	while (current) {
+		if (current.hidden || current.alpha <= 0.0) {
+			return NO;
+		}
+		if (current == root) break;
+		current = current.superview;
+	}
+	return YES;
+}
+
++ (id)dedupeKeyForImageView:(UIImageView *)imageView {
+	// SDWebImage is already linked into the BeReal binary; if this image view
+	// is backed by it, its source URL is the most reliable identity to dedupe
+	// on (a swapped/hidden copy of the same photo shares the same URL).
+	if ([imageView respondsToSelector:@selector(sd_imageURL)]) {
+		id url = [imageView valueForKey:@"sd_imageURL"];
+		if (url) return url;
+	}
+
+	if (imageView.image) {
+		return [NSValue valueWithNonretainedObject:imageView.image];
+	}
+
+	return [NSValue valueWithNonretainedObject:imageView];
 }
 
 + (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo {
-    if (error) {
-        NSLog(@"[Bea]Error saving image: %@", error.localizedDescription);
-    } else {
-        UIButton *button = (__bridge UIButton *)contextInfo;
-		UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:19];
-		UIImage *checkmarkImage = [UIImage systemImageNamed:@"checkmark.circle.fill" withConfiguration:config];
-		[UIView transitionWithView:button duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-		[button setImage:checkmarkImage forState:UIControlStateNormal];
-		[button setEnabled:NO]; 
-		[button.imageView setTintColor:[UIColor colorWithRed:122.0/255.0 green:255.0/255.0 blue:108.0/255.0 alpha:1.0]];} completion:nil];
+	BeaDownloadContext *context = (BeaDownloadContext *)CFBridgingRelease(contextInfo);
 
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-			UIImage *downloadImage = [UIImage systemImageNamed:@"arrow.down.circle.fill" withConfiguration:config];
-			[UIView transitionWithView:button duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-				[button setImage:downloadImage forState:UIControlStateNormal];
-				[button.imageView setTintColor:[UIColor whiteColor]];
-				[button setEnabled:YES];
-			} completion:nil];
-        });
-    }
+	// UIImageWriteToSavedPhotosAlbum's completion isn't guaranteed to land on
+	// the main thread, and with two images in flight it can arrive from two
+	// threads at once - serialize the shared counter through the main queue.
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (error) {
+			NSLog(@"[Bea]Error saving image: %@", error.localizedDescription);
+			context.failed = YES;
+		}
+
+		context.remaining -= 1;
+		if (context.remaining > 0) return;
+
+		if (context.failed) {
+			// Leave the button as-is (no checkmark) but re-enable it - it was
+			// disabled before the saves started and must not get stuck.
+			context.button.enabled = YES;
+		} else {
+			[self flashCheckmarkOnButton:context.button];
+		}
+	});
+}
+
++ (void)flashCheckmarkOnButton:(UIButton *)button {
+	if (!button) return;
+
+	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:19];
+	UIImage *checkmarkImage = [UIImage systemImageNamed:@"checkmark.circle.fill" withConfiguration:config];
+	[UIView transitionWithView:button duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+	[button setImage:checkmarkImage forState:UIControlStateNormal];
+	[button setEnabled:NO];
+	[button.imageView setTintColor:[UIColor colorWithRed:122.0/255.0 green:255.0/255.0 blue:108.0/255.0 alpha:1.0]];} completion:nil];
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		UIImage *downloadImage = [UIImage systemImageNamed:@"arrow.down.circle.fill" withConfiguration:config];
+		[UIView transitionWithView:button duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+			[button setImage:downloadImage forState:UIControlStateNormal];
+			[button.imageView setTintColor:[UIColor whiteColor]];
+			[button setEnabled:YES];
+		} completion:nil];
+    });
 }
 @end
