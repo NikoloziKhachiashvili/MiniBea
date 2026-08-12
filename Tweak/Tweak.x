@@ -115,6 +115,8 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 	UIView *root = [self view];
 	if (!root) return;
 
+	UIWindow *window = root.window;
+
 	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
 	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
 
@@ -131,20 +133,33 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 		existingButton = nil;
 	}
 
-	if (existingButton) return;
+	if (existingButton) {
+		// A gated ("Post to view") post's lock overlay can mount, or remount,
+		// after our button was added, covering it and silently eating its
+		// taps - reassert front position on every layout pass rather than
+		// trusting it to stick from creation time.
+		if (window) [window bringSubviewToFront:existingButton];
+		return;
+	}
 
 	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:root].firstObject;
-	if (!anchor) return;
+	if (!anchor || !window) return;
 
-	// Attach the button to the post's own local container (not `root`, which
-	// can be a shared pager view spanning more than one post) so that
-	// BeaDownloader's search - rooted at the button's own superview - stays
-	// scoped to this post's own photos when tapped.
+	// Search scope stays tied to the post's own local container (not `root`,
+	// which can be a shared pager view spanning more than one post).
 	UIView *localContainer = [BeaDownloader localContainerForAnchor:anchor upToRoot:root];
 
+	// localContainerForAnchor: falls back to returning *something* even when
+	// it never found a real front+back pair nearby (e.g. a single incidental
+	// >=400pt image on an unrelated screen) - only proceed when it actually
+	// found a genuine pair, otherwise this creates a stray button attached to
+	// content that isn't really a BeReal post.
+	if (!localContainer || [BeaDownloader qualifyingImageViewsInView:localContainer].count < 2) return;
+
 	// SwiftUI-bridged layout containers commonly ship with interaction
-	// disabled, only opting specific children back in - without this, the
-	// button renders and positions correctly but never receives taps.
+	// disabled, only opting specific children back in - without this, taps
+	// aimed at the post's own content (and, previously, the button itself)
+	// never reach anything.
 	[BeaDownloader enableUserInteractionFromView:localContainer upToRoot:root];
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
@@ -152,7 +167,15 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
 	objc_setAssociatedObject(self, BeaDownloadButtonKey, downloadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	[localContainer addSubview:downloadButton];
+	[BeaDownloader setSearchRoot:localContainer forButton:downloadButton];
+
+	// Attach to the window, not the post's own container. A gated post's
+	// lock overlay is drawn above the post's content, so no z-order trick
+	// scoped to the post's own view tree can out-rank it - the window is
+	// above everything in this controller by construction, and staying there
+	// (reasserted above) survives the overlay mounting at any point later.
+	[window addSubview:downloadButton];
+	[window bringSubviewToFront:downloadButton];
 
 	[NSLayoutConstraint activateConstraints:@[
 		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],

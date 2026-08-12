@@ -27,4 +27,11 @@
 // setting, since hit-testing stops descending as soon as it hits a disabled
 // ancestor. Forces it back on from view up to and including root.
 + (void)enableUserInteractionFromView:(UIView *)view upToRoot:(UIView *)root;
+// Records which post-local container downloadImage: should search when this
+// button is tapped. The button itself is attached to the window rather than
+// to that container (see Tweak.x) so a gated post's lock overlay - drawn
+// above the post's own content - can never end up covering it; this is what
+// lets downloadImage: still find the right pair of photos despite the button
+// no longer living anywhere near them in the view tree.
++ (void)setSearchRoot:(UIView *)root forButton:(UIButton *)button;
 @end

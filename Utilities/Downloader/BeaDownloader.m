@@ -1,4 +1,7 @@
 #import "BeaDownloader.h"
+#import <objc/runtime.h>
+
+static const void *BeaSearchRootKey = &BeaSearchRootKey;
 
 // Tracks an in-flight save of one BeReal's images (front + back) so the
 // checkmark/re-enable only fires once, after every image has finished saving.
@@ -14,7 +17,10 @@
 @implementation BeaDownloader
 + (void)downloadImage:(id)sender {
 	UIButton *button = (UIButton *)sender;
-	UIView *root = button.superview;
+	// The button lives on the window now (see setSearchRoot:forButton: and
+	// Tweak.x), so button.superview is the window, not the post - the real
+	// search scope was recorded separately at creation time.
+	UIView *root = objc_getAssociatedObject(button, BeaSearchRootKey) ?: button.superview;
 	if (!root) return;
 
 	NSArray<UIImageView *> *sorted = [self qualifyingImageViewsInView:root];
@@ -136,6 +142,10 @@
 		if (current == root) break;
 		current = current.superview;
 	}
+}
+
++ (void)setSearchRoot:(UIView *)root forButton:(UIButton *)button {
+	objc_setAssociatedObject(button, BeaSearchRootKey, root, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 + (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {
