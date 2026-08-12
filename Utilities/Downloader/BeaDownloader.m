@@ -17,10 +17,33 @@
 	UIView *root = button.superview;
 	if (!root) return;
 
+	NSArray<UIImageView *> *sorted = [self qualifyingImageViewsInView:root];
+
+	// Largest displayed frame first (back camera in the normal, un-swapped
+	// state), capped at 2 since a BeReal is exactly two photos.
+	NSUInteger saveCount = MIN(sorted.count, (NSUInteger)2);
+	if (saveCount == 0) return;
+
+	NSArray<UIImageView *> *toSave = [sorted subarrayWithRange:NSMakeRange(0, saveCount)];
+
+	button.enabled = NO;
+
+	BeaDownloadContext *context = [BeaDownloadContext new];
+	context.button = button;
+	context.remaining = toSave.count;
+	context.failed = NO;
+
+	for (UIImageView *imageView in toSave) {
+		void *contextInfo = (void *)CFBridgingRetain(context);
+		UIImageWriteToSavedPhotosAlbum(imageView.image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
+	}
+}
+
++ (NSArray<UIImageView *> *)qualifyingImageViewsInView:(UIView *)root {
 	NSMutableArray<UIImageView *> *candidates = [NSMutableArray array];
 	[self collectImageViewsInView:root result:candidates];
 
-	if (candidates.count == 0) return;
+	if (candidates.count == 0) return @[];
 
 	// Process visible views before hidden ones so dedupe keeps the copy with
 	// meaningful on-screen geometry (BeReal keeps a hidden copy of whichever
@@ -47,9 +70,7 @@
 		[uniqueImageViews addObject:imageView];
 	}
 
-	// Largest displayed frame first (back camera in the normal, un-swapped
-	// state), capped at 2 since a BeReal is exactly two photos.
-	NSArray<UIImageView *> *sorted = [uniqueImageViews sortedArrayUsingComparator:^NSComparisonResult(UIImageView *a, UIImageView *b) {
+	return [uniqueImageViews sortedArrayUsingComparator:^NSComparisonResult(UIImageView *a, UIImageView *b) {
 		CGRect frameA = [a convertRect:a.bounds toView:nil];
 		CGRect frameB = [b convertRect:b.bounds toView:nil];
 		CGFloat areaA = frameA.size.width * frameA.size.height;
@@ -58,23 +79,6 @@
 		if (areaA < areaB) return NSOrderedDescending;
 		return NSOrderedSame;
 	}];
-
-	NSUInteger saveCount = MIN(sorted.count, (NSUInteger)2);
-	if (saveCount == 0) return;
-
-	NSArray<UIImageView *> *toSave = [sorted subarrayWithRange:NSMakeRange(0, saveCount)];
-
-	button.enabled = NO;
-
-	BeaDownloadContext *context = [BeaDownloadContext new];
-	context.button = button;
-	context.remaining = toSave.count;
-	context.failed = NO;
-
-	for (UIImageView *imageView in toSave) {
-		void *contextInfo = (void *)CFBridgingRetain(context);
-		UIImageWriteToSavedPhotosAlbum(imageView.image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
-	}
 }
 
 + (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {

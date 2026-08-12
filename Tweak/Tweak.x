@@ -74,44 +74,43 @@
 }
 %end
 
-%hook MediaView
+%hook POVPostHostingCollectionViewCell
 %property (nonatomic, strong) BeaButton *downloadButton;
+%property (nonatomic, strong) UIView *downloadButtonAnchor;
 
-- (void)drawRect:(CGRect)rect {
+- (void)layoutSubviews {
 	%orig;
 
-	// Check if we need to remove subviews other than the main image (to keep the reaction&comment button)
-	// 1. Not posted yet & 2. Not tagged in that post (especially to keep the reshare button)
-	if ([NSStringFromClass([[self subviews].lastObject class]) isEqualToString:@"_TtCOCV7SwiftUI11DisplayList11ViewUpdater8Platform13CGDrawingView"] && [[self subviews] count] > 5) { 
-		for (int i = 1; i < [[self subviews] count]; i++) {
-			[[self subviews][i] setHidden:YES];
-		}
+	// UICollectionView reuses cells across different posts as the feed
+	// scrolls. If the image view we last anchored the button to is no longer
+	// part of this cell (its SwiftUI-hosted content got swapped out), tear
+	// down the stale button/constraints and re-attach below against whatever
+	// is showing now.
+	if ([self downloadButton] && (![self downloadButtonAnchor] || ![[self downloadButtonAnchor] isDescendantOfView:self])) {
+		[[self downloadButton] removeFromSuperview];
+		[self setDownloadButton:nil];
+		[self setDownloadButtonAnchor:nil];
 	}
 
-	// Every time we swich images it resets the user interaction stat, so we set the identifier and track it in the hook
-	[self subviews][0].accessibilityIdentifier = @"Beaw";
+	if ([self downloadButton]) return;
+
+	// Anchor to the actual largest photo in this cell rather than the cell's
+	// own edges - we don't know what else (captions, header, buttons) BeReal
+	// lays out around it, but we do know where the photo itself ends up.
+	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:self].firstObject;
+	if (!anchor) return;
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
 
-    [self setDownloadButton:downloadButton];
-    [self addSubview:downloadButton];
+	[self setDownloadButton:downloadButton];
+	[self setDownloadButtonAnchor:anchor];
+	[self addSubview:downloadButton];
 
 	[NSLayoutConstraint activateConstraints:@[
-		[[[self downloadButton] trailingAnchor] constraintEqualToAnchor:[self trailingAnchor] constant:-11.6],
-		[[[self downloadButton] bottomAnchor] constraintEqualToAnchor:[self topAnchor] constant:47.333]
+		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],
+		[[downloadButton topAnchor] constraintEqualToAnchor:anchor.topAnchor constant:11.6]
 	]];
-}
-%end
-
-%hook DoubleMediaView
-- (BOOL)isUserInteractionEnabled {
-	// This prevent us from using the reaction&comment button if we always return yes (although it allows us to switch images when not posted yet)
-	// so only apply it to the desired element
-	if ([[self accessibilityIdentifier] isEqualToString:@"Beaw"]){
-		return YES;
-	}
-	return %orig;
 }
 %end
 
@@ -188,9 +187,15 @@ BOOL isBlockedPath(const char *path) {
 %end
 
 %ctor {
+	// Swift classes are normally exposed to the ObjC runtime as
+	// "Module.ClassName", but fall back to the bare name in case this
+	// particular class wasn't qualified - cheap, and %init just no-ops a
+	// hook group whose class resolves to Nil rather than crashing.
+	Class povPostCell = objc_getClass("FeaturePOVPresentation.POVPostHostingCollectionViewCell");
+	if (!povPostCell) povPostCell = objc_getClass("POVPostHostingCollectionViewCell");
+
 	%init(
-	  MediaView = objc_getClass("_TtGC7SwiftUI14_UIHostingViewVS_14_ViewList_View_"),
-	  DoubleMediaView = objc_getClass("_TtC7SwiftUIP33_A34643117F00277B93DEBAB70EC0697116_UIInheritedView"),
+	  POVPostHostingCollectionViewCell = povPostCell,
       HomeViewController = objc_getClass("BeReal.HomeViewController"),
 	  AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);
