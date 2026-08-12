@@ -34,6 +34,21 @@
 // setting, since hit-testing stops descending as soon as it hits a disabled
 // ancestor. Forces it back on from view up to and including root.
 + (void)enableUserInteractionFromView:(UIView *)view upToRoot:(UIView *)root;
+// Same idea as enableUserInteractionFromView:upToRoot:, but downward through
+// every descendant instead of upward through ancestors - a gated post
+// disables interaction well beyond just whatever blocked our own button
+// (e.g. BeReal's own tap-to-swap-camera gesture on the photo itself), and
+// there's no single specific descendant to target it at.
++ (void)enableUserInteractionRecursivelyInView:(UIView *)view;
+// Finds and hides the "Post to view" lock overlay (icon, title/body text,
+// and CTA button) that a gated post draws above its own photo - separate
+// from, and unaffected by, the CAFilter blur-removal hook, since it's a
+// distinct always-shown UI element rather than part of the image itself.
+// Scoped to root and excludes anything containing one of images, so this
+// can't reach into an unrelated screen (e.g. the actual camera/upload flow,
+// which never has a qualifying photo pair to exclude against in the first
+// place).
++ (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images;
 // Records which post-local container downloadImage: should search when this
 // button is tapped. The button itself is attached to the window rather than
 // to that container (see Tweak.x) so a gated post's lock overlay - drawn

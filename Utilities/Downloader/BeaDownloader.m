@@ -167,6 +167,76 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 	objc_setAssociatedObject(button, BeaSearchRootKey, root, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
++ (void)enableUserInteractionRecursivelyInView:(UIView *)view {
+	view.userInteractionEnabled = YES;
+	for (UIView *subview in view.subviews) {
+		[self enableUserInteractionRecursivelyInView:subview];
+	}
+}
+
++ (BOOL)view:(UIView *)view containsDescendantOfClass:(Class)klass {
+	if ([view isKindOfClass:klass]) return YES;
+	for (UIView *subview in view.subviews) {
+		if ([self view:subview containsDescendantOfClass:klass]) return YES;
+	}
+	return NO;
+}
+
++ (void)collectGatingLabelsInView:(UIView *)view result:(NSMutableArray<UILabel *> *)result {
+	if ([view isKindOfClass:[UILabel class]]) {
+		UILabel *label = (UILabel *)view;
+		if ([label.text.lowercaseString containsString:@"to view"]) {
+			[result addObject:label];
+		}
+	}
+	for (UIView *subview in view.subviews) {
+		[self collectGatingLabelsInView:subview result:result];
+	}
+}
+
++ (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
+	NSMutableArray<UILabel *> *labels = [NSMutableArray array];
+	[self collectGatingLabelsInView:root result:labels];
+	if (labels.count == 0) return;
+
+	for (UILabel *label in labels) {
+		UIView *candidate = label.superview;
+		UIView *overlay = nil;
+		NSInteger levelsWalked = 0;
+
+		while (candidate && candidate != root && levelsWalked < 10) {
+			BOOL containsPhoto = NO;
+			for (UIImageView *imageView in images) {
+				if ([imageView isDescendantOfView:candidate]) {
+					containsPhoto = YES;
+					break;
+				}
+			}
+
+			if (!containsPhoto && [self view:candidate containsDescendantOfClass:[UIButton class]]) {
+				overlay = candidate;
+				break;
+			}
+
+			// Any wider ancestor will still contain the photo too - there's
+			// no scope above this point that has the overlay's controls
+			// without the actual post content, so stop widening.
+			if (containsPhoto) break;
+
+			candidate = candidate.superview;
+			levelsWalked++;
+		}
+
+		if (overlay) {
+			overlay.hidden = YES;
+		} else if (!label.hidden) {
+			// No safely-scoped container found - at minimum hide the label
+			// itself so its text stops covering the photo.
+			label.hidden = YES;
+		}
+	}
+}
+
 + (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {
 	// Deliberately does not prune hidden/zero-alpha subtrees here (unlike the
 	// old class-name-based search) - the front camera's image view may live in

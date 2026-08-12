@@ -117,6 +117,15 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
 	UIWindow *window = root.window;
 
+	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
+
+	// Gated ("Post to view") posts draw a lock overlay - eye-slash icon,
+	// title/body text, and a CTA button - above the photo, separate from and
+	// unaffected by the CAFilter blur-removal hook below. Runs unconditionally
+	// on every layout pass, since BeReal can (re)mount it at any time, same
+	// as the button z-order issue this file already works around.
+	[BeaDownloader hideGatingOverlaysInView:root excludingImages:qualifyingImages];
+
 	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
 	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
 
@@ -135,6 +144,38 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 		existingButton = nil;
 	}
 
+	// Reject grid-view thumbnails and small chrome elements as anchors - the
+	// general on-screen filter inside qualifyingImageViewsInView: is
+	// deliberately permissive (it has to accept the front camera's narrow
+	// PiP too), so this is the one place that requires the anchor to
+	// actually be a full-size, single-post photo.
+	UIView *anchor = qualifyingImages.firstObject;
+	UIView *localContainer = nil;
+	if (anchor && [BeaDownloader isAnchorDisplayedProminently:anchor]) {
+		// Search scope stays tied to the post's own local container (not
+		// `root`, which can be a shared pager view spanning more than one
+		// post).
+		UIView *candidateContainer = [BeaDownloader localContainerForAnchor:anchor upToRoot:root];
+
+		// localContainerForAnchor: falls back to returning *something* even
+		// when it never found a real front+back pair nearby (e.g. a single
+		// incidental >=400pt image on an unrelated screen) - only treat it
+		// as valid when it actually found a genuine pair.
+		if (candidateContainer && [BeaDownloader qualifyingImageViewsInView:candidateContainer].count >= 2) {
+			localContainer = candidateContainer;
+
+			// SwiftUI-bridged layout containers commonly ship with
+			// interaction disabled, only opting specific children back in -
+			// without this, taps aimed at the post's own content (our
+			// button, and BeReal's own tap-to-swap-camera gesture) never
+			// reach anything. Runs every pass, not just at button-creation
+			// time, in case BeReal re-disables it later the same way it can
+			// remount the lock overlay above.
+			[BeaDownloader enableUserInteractionFromView:localContainer upToRoot:root];
+			[BeaDownloader enableUserInteractionRecursivelyInView:localContainer];
+		}
+	}
+
 	if (existingButton) {
 		// A gated ("Post to view") post's lock overlay can mount, or remount,
 		// after our button was added, covering it and silently eating its
@@ -144,32 +185,7 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 		return;
 	}
 
-	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:root].firstObject;
-	if (!anchor || !window) return;
-
-	// Reject grid-view thumbnails and small chrome elements as anchors before
-	// doing anything else - the general on-screen filter above is deliberately
-	// permissive (it has to accept the front camera's narrow PiP too), so this
-	// is the one place that requires the anchor to actually be a full-size,
-	// single-post photo.
-	if (![BeaDownloader isAnchorDisplayedProminently:anchor]) return;
-
-	// Search scope stays tied to the post's own local container (not `root`,
-	// which can be a shared pager view spanning more than one post).
-	UIView *localContainer = [BeaDownloader localContainerForAnchor:anchor upToRoot:root];
-
-	// localContainerForAnchor: falls back to returning *something* even when
-	// it never found a real front+back pair nearby (e.g. a single incidental
-	// >=400pt image on an unrelated screen) - only proceed when it actually
-	// found a genuine pair, otherwise this creates a stray button attached to
-	// content that isn't really a BeReal post.
-	if (!localContainer || [BeaDownloader qualifyingImageViewsInView:localContainer].count < 2) return;
-
-	// SwiftUI-bridged layout containers commonly ship with interaction
-	// disabled, only opting specific children back in - without this, taps
-	// aimed at the post's own content (and, previously, the button itself)
-	// never reach anything.
-	[BeaDownloader enableUserInteractionFromView:localContainer upToRoot:root];
+	if (!anchor || !window || !localContainer) return;
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
