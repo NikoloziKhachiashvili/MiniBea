@@ -84,7 +84,7 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 	if (depth > 6) return; // SwiftUI-hosted trees can get deep; cap it
 	NSMutableString *indent = [NSMutableString string];
 	for (NSInteger i = 0; i < depth; i++) [indent appendString:@"  "];
-	NSLog(@"[Bea][diag]%@%@ frame=%@ hidden=%d alpha=%.2f isImageView=%d",
+	NSLog(@"[Bea][diag]%{public}@%{public}@ frame=%{public}@ hidden=%d alpha=%.2f isImageView=%d",
 		indent, NSStringFromClass([view class]), NSStringFromCGRect(view.frame),
 		view.hidden, view.alpha, [view isKindOfClass:[UIImageView class]]);
 	for (UIView *subview in view.subviews) {
@@ -136,14 +136,14 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 	if (!anchor) {
 		if (BeaDiagHierarchyDumpsRemaining > 0) {
 			BeaDiagHierarchyDumpsRemaining--;
-			NSLog(@"[Bea][diag] viewDidLayoutSubviews fired on UIHostingController (rootView=%@, subviews=%lu) but found no qualifying UIImageView. Dumping hierarchy:",
+			NSLog(@"[Bea][diag] viewDidLayoutSubviews fired on UIHostingController (rootView=%{public}@, subviews=%lu) but found no qualifying UIImageView. Dumping hierarchy:",
 				NSStringFromClass([root class]), (unsigned long)[[root subviews] count]);
 			BeaLogViewHierarchy(root, 0);
 		}
 		return;
 	}
 
-	NSLog(@"[Bea][diag] Anchoring download button to %@ frame=%@", NSStringFromClass([anchor class]), NSStringFromCGRect(anchor.frame));
+	NSLog(@"[Bea][diag] Anchoring download button to %{public}@ frame=%{public}@", NSStringFromClass([anchor class]), NSStringFromCGRect(anchor.frame));
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
@@ -178,16 +178,22 @@ void BeaLogAllHostingClasses(void) {
 	if (!classes) return;
 	numClasses = objc_getClassList(classes, numClasses);
 
+	// Last scan showed mostly <private> (iOS's unified logging redacts %s/%@
+	// dynamic content by default) - {public} forces our own diagnostic output
+	// to actually be visible. Also narrowed from *Hosting* (281 matches, almost
+	// all unrelated system-framework internals) to *HostingController*, which
+	// still catches UIHostingController and its generic-specialization mangled
+	// forms (_TtGC7SwiftUI19UIHostingController<...>) while cutting the noise.
 	NSInteger found = 0;
 	for (int i = 0; i < numClasses; i++) {
 		const char *name = class_getName(classes[i]);
-		if (name && strstr(name, "Hosting")) {
-			NSLog(@"[Bea][diag] Loaded class matching *Hosting*: %s (superclass: %@)",
+		if (name && strstr(name, "HostingController")) {
+			NSLog(@"[Bea][diag] Loaded class matching *HostingController*: %{public}s (superclass: %{public}@)",
 				name, NSStringFromClass(class_getSuperclass(classes[i])));
 			found++;
 		}
 	}
-	NSLog(@"[Bea][diag] Scanned %d loaded classes, %ld matched *Hosting*", numClasses, (long)found);
+	NSLog(@"[Bea][diag] Scanned %d loaded classes, %ld matched *HostingController*", numClasses, (long)found);
 	free(classes);
 }
 
@@ -210,7 +216,7 @@ void BeaLogAllHostingClasses(void) {
 	%orig;
 	if (BeaClassScansRemaining > 0) {
 		BeaClassScansRemaining--;
-		NSLog(@"[Bea][diag] viewDidAppear on %@ - scanning loaded classes", NSStringFromClass([self class]));
+		NSLog(@"[Bea][diag] viewDidAppear on %{public}@ - scanning loaded classes", NSStringFromClass([self class]));
 		BeaLogAllHostingClasses();
 	}
 }
@@ -306,7 +312,7 @@ void BeaTryHookUIHostingController(const struct mach_header *mh, intptr_t vmaddr
 
 	BeaHostingControllerHooked = YES;
 	// TEMPORARY - see BeaLogViewHierarchy above.
-	NSLog(@"[Bea][diag] UIHostingController resolved via %@ (image load callback #%ld): %@", resolvedVia, (long)BeaImageCallbackCount, hostingController);
+	NSLog(@"[Bea][diag] UIHostingController resolved via %{public}@ (image load callback #%ld): %{public}@", resolvedVia, (long)BeaImageCallbackCount, hostingController);
 
 	%init(BeaSwiftUIGroup, UIHostingController = hostingController);
 }
