@@ -99,6 +99,10 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 // public UIHostingController instead - see the interface comment in Tweak.h
 // for why this should be far more stable than guessing at BeReal's internal
 // class names again.
+// Own named %group since it's %init'd separately (and later) from every
+// other hook in this file - see BeaTryHookUIHostingController below. Logos
+// only allows the default/"ungrouped" %init to be called once per file.
+%group BeaSwiftUIGroup
 %hook UIHostingController
 %property (nonatomic, strong) BeaButton *downloadButton;
 %property (nonatomic, strong) UIView *downloadButtonAnchor;
@@ -153,6 +157,7 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 		[[downloadButton topAnchor] constraintEqualToAnchor:anchor.topAnchor constant:11.6]
 	]];
 }
+%end
 %end
 
 %hook UIViewController
@@ -252,7 +257,7 @@ void BeaTryHookUIHostingController(const struct mach_header *mh, intptr_t vmaddr
 	// TEMPORARY - see BeaLogViewHierarchy above.
 	NSLog(@"[Bea][diag] UIHostingController resolved via %@ (image load callback): %@", resolvedVia, hostingController);
 
-	%init(UIHostingController = hostingController);
+	%init(BeaSwiftUIGroup, UIHostingController = hostingController);
 }
 
 %ctor {
