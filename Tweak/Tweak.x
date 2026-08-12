@@ -227,26 +227,39 @@ BOOL isBlockedPath(const char *path) {
 }
 %end
 
-%ctor {
-	// UIHostingController is Apple's own public class (SwiftUI framework), so
-	// unlike BeReal's own Swift classes it may or may not be module-qualified
-	// for ObjC - try both.
+// UIHostingController lives in SwiftUI.framework, which - unlike BeReal's own
+// classes, always present in the main executable - may be lazily loaded and
+// not yet mapped into the process when %ctor runs (dylibs load very early,
+// typically before main()). objc_getClass returning Nil for it at ctor time
+// doesn't mean the class doesn't exist, just that it isn't registered *yet*.
+// _dyld_register_func_for_add_image's callback fires once for every image
+// already loaded at registration time, then again for every future image
+// load, so this catches SwiftUI whether it's loaded before or after us.
+static BOOL BeaHostingControllerHooked = NO;
+
+void BeaTryHookUIHostingController(const struct mach_header *mh, intptr_t vmaddr_slide) {
+	if (BeaHostingControllerHooked) return;
+
 	Class hostingController = objc_getClass("SwiftUI.UIHostingController");
 	NSString *resolvedVia = @"qualified name";
 	if (!hostingController) {
 		hostingController = objc_getClass("UIHostingController");
 		resolvedVia = @"bare name";
 	}
-	// TEMPORARY - see BeaLogViewHierarchy above.
-	if (hostingController) {
-		NSLog(@"[Bea][diag] UIHostingController resolved via %@: %@", resolvedVia, hostingController);
-	} else {
-		NSLog(@"[Bea][diag] UIHostingController FAILED to resolve via either name - the download button hook will never install.");
-	}
+	if (!hostingController) return;
 
+	BeaHostingControllerHooked = YES;
+	// TEMPORARY - see BeaLogViewHierarchy above.
+	NSLog(@"[Bea][diag] UIHostingController resolved via %@ (image load callback): %@", resolvedVia, hostingController);
+
+	%init(UIHostingController = hostingController);
+}
+
+%ctor {
 	%init(
-	  UIHostingController = hostingController,
       HomeViewController = objc_getClass("BeReal.HomeViewController"),
 	  AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);
+
+	_dyld_register_func_for_add_image(BeaTryHookUIHostingController);
 }
