@@ -129,6 +129,15 @@
 	return fallback;
 }
 
++ (void)enableUserInteractionFromView:(UIView *)view upToRoot:(UIView *)root {
+	UIView *current = view;
+	while (current) {
+		current.userInteractionEnabled = YES;
+		if (current == root) break;
+		current = current.superview;
+	}
+}
+
 + (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {
 	// Deliberately does not prune hidden/zero-alpha subtrees here (unlike the
 	// old class-name-based search) - the front camera's image view may live in

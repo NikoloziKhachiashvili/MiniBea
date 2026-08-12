@@ -21,4 +21,10 @@
 // isDescendantOfView: alone stays true long after a post has scrolled off
 // screen, until BeReal's own view recycling actually tears it down.
 + (BOOL)isViewOnScreen:(UIView *)view;
+// SwiftUI-bridged wrapper/layout views commonly ship with interaction
+// disabled, only re-enabling it on specific interactive children - a button
+// added under such an ancestor never receives touches regardless of its own
+// setting, since hit-testing stops descending as soon as it hits a disabled
+// ancestor. Forces it back on from view up to and including root.
++ (void)enableUserInteractionFromView:(UIView *)view upToRoot:(UIView *)root;
 @end

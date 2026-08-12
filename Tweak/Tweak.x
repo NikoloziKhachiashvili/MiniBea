@@ -142,6 +142,11 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 	// scoped to this post's own photos when tapped.
 	UIView *localContainer = [BeaDownloader localContainerForAnchor:anchor upToRoot:root];
 
+	// SwiftUI-bridged layout containers commonly ship with interaction
+	// disabled, only opting specific children back in - without this, the
+	// button renders and positions correctly but never receives taps.
+	[BeaDownloader enableUserInteractionFromView:localContainer upToRoot:root];
+
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
 
