@@ -134,12 +134,18 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:root].firstObject;
 	if (!anchor) return;
 
+	// Attach the button to the post's own local container (not `root`, which
+	// can be a shared pager view spanning more than one post) so that
+	// BeaDownloader's search - rooted at the button's own superview - stays
+	// scoped to this post's own photos when tapped.
+	UIView *localContainer = [BeaDownloader localContainerForAnchor:anchor upToRoot:root];
+
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
 
 	objc_setAssociatedObject(self, BeaDownloadButtonKey, downloadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	[root addSubview:downloadButton];
+	[localContainer addSubview:downloadButton];
 
 	[NSLayoutConstraint activateConstraints:@[
 		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],

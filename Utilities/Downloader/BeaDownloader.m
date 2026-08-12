@@ -101,6 +101,30 @@
 	}];
 }
 
++ (UIView *)localContainerForAnchor:(UIView *)anchor upToRoot:(UIView *)root {
+	// Adjacent posts are always at least partially on-screen (the feed peeks
+	// the next/previous post at the top/bottom edge for swipe affordance), so
+	// the on-screen check in qualifyingImageViewsInView: alone can't tell a
+	// peeking neighbor's photo apart from this post's own second (usually much
+	// smaller) camera. View-tree proximity can: front and back camera image
+	// views of the same post are near each other in the hierarchy, while a
+	// different post's images live under a completely different branch.
+	// Walk up from the anchor looking for the smallest ancestor that already
+	// contains a full pair on its own - that's the post's own local container.
+	UIView *candidate = anchor.superview;
+	UIView *fallback = candidate ?: anchor;
+	NSInteger levelsWalked = 0;
+	while (candidate && candidate != root && levelsWalked < 12) {
+		if ([self qualifyingImageViewsInView:candidate].count >= 2) {
+			return candidate;
+		}
+		fallback = candidate;
+		candidate = candidate.superview;
+		levelsWalked++;
+	}
+	return fallback;
+}
+
 + (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {
 	// Deliberately does not prune hidden/zero-alpha subtrees here (unlike the
 	// old class-name-based search) - the front camera's image view may live in
