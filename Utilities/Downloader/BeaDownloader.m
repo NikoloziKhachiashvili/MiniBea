@@ -1,5 +1,6 @@
 #import "BeaDownloader.h"
 #import <objc/runtime.h>
+#import <os/log.h>
 
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
 
@@ -174,10 +175,15 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 	}
 }
 
-+ (BOOL)view:(UIView *)view containsDescendantOfClass:(Class)klass {
-	if ([view isKindOfClass:klass]) return YES;
++ (BOOL)viewOrDescendantIsButtonLike:(UIView *)view {
+	// A plain UIButton class check misses SwiftUI's own Button, which when
+	// hosted in UIKit doesn't reliably bridge to a real UIButton instance -
+	// but SwiftUI does correctly mark it accessible as a button regardless of
+	// its underlying class, so check accessibility traits too.
+	if ([view isKindOfClass:[UIButton class]]) return YES;
+	if ((view.accessibilityTraits & UIAccessibilityTraitButton) != 0) return YES;
 	for (UIView *subview in view.subviews) {
-		if ([self view:subview containsDescendantOfClass:klass]) return YES;
+		if ([self viewOrDescendantIsButtonLike:subview]) return YES;
 	}
 	return NO;
 }
@@ -185,7 +191,13 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 + (void)collectGatingLabelsInView:(UIView *)view result:(NSMutableArray<UILabel *> *)result {
 	if ([view isKindOfClass:[UILabel class]]) {
 		UILabel *label = (UILabel *)view;
-		if ([label.text.lowercaseString containsString:@"to view"]) {
+		NSString *text = label.text.lowercaseString;
+		// Matched on the specific gating copy, not a generic fragment like
+		// "to view" - that alone turned out to also match unrelated text
+		// elsewhere (e.g. auto-generated accessibility hints such as "...tap
+		// to view..." on nav bar icons), hiding things nowhere near the
+		// actual lock overlay.
+		if ([text containsString:@"post to view"] || [text containsString:@"share yours with them"]) {
 			[result addObject:label];
 		}
 	}
@@ -200,6 +212,8 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 	if (labels.count == 0) return;
 
 	for (UILabel *label in labels) {
+		os_log(OS_LOG_DEFAULT, "[Bea] gating label matched: %{public}@", label.text);
+
 		UIView *candidate = label.superview;
 		UIView *overlay = nil;
 		NSInteger levelsWalked = 0;
@@ -213,7 +227,7 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 				}
 			}
 
-			if (!containsPhoto && [self view:candidate containsDescendantOfClass:[UIButton class]]) {
+			if (!containsPhoto && [self viewOrDescendantIsButtonLike:candidate]) {
 				overlay = candidate;
 				break;
 			}
@@ -228,10 +242,12 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 		}
 
 		if (overlay) {
+			os_log(OS_LOG_DEFAULT, "[Bea] hiding gating overlay container %{public}@ (%d levels up)", overlay, (int)levelsWalked);
 			overlay.hidden = YES;
 		} else if (!label.hidden) {
 			// No safely-scoped container found - at minimum hide the label
 			// itself so its text stops covering the photo.
+			os_log(OS_LOG_DEFAULT, "[Bea] no safe overlay container found within 10 levels, hiding label only");
 			label.hidden = YES;
 		}
 	}
