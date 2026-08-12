@@ -74,38 +74,32 @@
 }
 %end
 
-// TEMPORARY diagnostics - remove once the button reliably appears.
-// Budget is small since UIHostingController fires for every SwiftUI-hosted
-// screen in the app, not just the feed - most calls are expected to find no
-// qualifying image and that's normal, only worth seeing a handful of times.
-static NSInteger BeaDiagHierarchyDumpsRemaining = 3;
-
-void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
-	if (depth > 6) return; // SwiftUI-hosted trees can get deep; cap it
-	NSMutableString *indent = [NSMutableString string];
-	for (NSInteger i = 0; i < depth; i++) [indent appendString:@"  "];
-	NSLog(@"[Bea][diag]%@%@ frame=%@ hidden=%d alpha=%.2f isImageView=%d",
-		indent, NSStringFromClass([view class]), NSStringFromCGRect(view.frame),
-		view.hidden, view.alpha, [view isKindOfClass:[UIImageView class]]);
-	for (UIView *subview in view.subviews) {
-		BeaLogViewHierarchy(subview, depth + 1);
-	}
-}
-
-// FeaturePOVPresentation.POVPostHostingCollectionViewCell (an earlier attempt)
-// resolved fine but its layoutSubviews never fired - that class turns out to
-// belong to BeReal's separate POV video feature, not the main friends feed,
-// which has no plain UIKit cell class of its own at all. Hooking Apple's
-// public UIHostingController instead - see the interface comment in Tweak.h
-// for why this should be far more stable than guessing at BeReal's internal
-// class names again.
-// Own named %group since it's %init'd separately (and later) from every
-// other hook in this file - see BeaTryHookUIHostingController below. Logos
-// only allows the default/"ungrouped" %init to be called once per file.
-%group BeaSwiftUIGroup
-%hook UIHostingController
+// Device introspection (objc_getClassList scanning every loaded class) proved
+// there is no plain "UIHostingController" class to resolve at all: BeReal's
+// screens are all concrete bound-generic specializations like
+// _TtGC7SwiftUI19UIHostingControllerV6BeReal10ReportView_ - Swift mints a
+// distinct runtime class per SwiftUI view type, one per screen, with no
+// shared name to hook. But every one of those specializations reports its
+// own superclass as plain UIViewController, and UIViewController is already
+// hooked here (for the alert-dismissal fix below) - so the button logic lives
+// on viewDidLayoutSubviews here instead of on any one hosting-controller
+// class. The >=400pt width filter in qualifyingImageViewsInView: is what
+// keeps this scoped to actual BeReal photos rather than firing on every
+// screen in the app (settings, profile, camera, etc. all reach this too).
+%hook UIViewController
 %property (nonatomic, strong) BeaButton *downloadButton;
 %property (nonatomic, strong) UIView *downloadButtonAnchor;
+
+- (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
+	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
+    if ([viewControllerToPresent isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)viewControllerToPresent;
+        if ([alert.message isEqualToString:@"[\"Unable to load contents\"]"]) {
+            return;
+        }
+    }
+    %orig;
+}
 
 - (void)viewDidLayoutSubviews {
 	%orig;
@@ -113,11 +107,10 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 	UIView *root = [self view];
 	if (!root) return;
 
-	// Hosting controllers can get their content replaced/rebuilt (e.g. this
-	// one gets reused for a different screen, or the feed page it's hosting
-	// changes). If the image view we last anchored to is no longer part of
-	// this controller's view, tear down and re-attach against what's showing
-	// now.
+	// Content can get replaced/rebuilt under a given controller (e.g. cell/
+	// controller reuse, or navigating to different content). If the image
+	// view we last anchored to is no longer part of this controller's view,
+	// tear down and re-attach against what's showing now.
 	if ([self downloadButton] && (![self downloadButtonAnchor] || ![[self downloadButtonAnchor] isDescendantOfView:root])) {
 		[[self downloadButton] removeFromSuperview];
 		[self setDownloadButton:nil];
@@ -126,24 +119,8 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 
 	if ([self downloadButton]) return;
 
-	// Anchor to the actual largest qualifying photo rather than this
-	// controller's own view edges - most UIHostingController instances in the
-	// app aren't showing a BeReal photo at all (settings, profile, etc.), and
-	// the >=400pt width filter in qualifyingImageViewsInView: is what keeps
-	// this scoped to real BeReal photos instead of firing everywhere.
 	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:root].firstObject;
-
-	if (!anchor) {
-		if (BeaDiagHierarchyDumpsRemaining > 0) {
-			BeaDiagHierarchyDumpsRemaining--;
-			NSLog(@"[Bea][diag] viewDidLayoutSubviews fired on UIHostingController (rootView=%@, subviews=%lu) but found no qualifying UIImageView. Dumping hierarchy:",
-				NSStringFromClass([root class]), (unsigned long)[[root subviews] count]);
-			BeaLogViewHierarchy(root, 0);
-		}
-		return;
-	}
-
-	NSLog(@"[Bea][diag] Anchoring download button to %@ frame=%@", NSStringFromClass([anchor class]), NSStringFromCGRect(anchor.frame));
+	if (!anchor) return;
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
@@ -156,71 +133,6 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],
 		[[downloadButton topAnchor] constraintEqualToAnchor:anchor.topAnchor constant:11.6]
 	]];
-}
-%end
-%end
-
-// TEMPORARY - the previous attempt (guessing "SwiftUI.UIHostingController"/
-// "UIHostingController" and waiting via dyld image callbacks) never resolved
-// at all, silently, across an entire test session - no log ever fired,
-// meaning it's not just a wrong name, the guess never became true. Rather
-// than guess a third name, ask the runtime directly what's actually loaded.
-static NSInteger BeaClassScansRemaining = 3;
-
-void BeaLogAllHostingClasses(void) {
-	int numClasses = objc_getClassList(NULL, 0);
-	if (numClasses <= 0) {
-		NSLog(@"[Bea][diag] objc_getClassList reported 0 classes");
-		return;
-	}
-
-	Class *classes = (Class *)malloc(sizeof(Class) * (unsigned long)numClasses);
-	if (!classes) return;
-	numClasses = objc_getClassList(classes, numClasses);
-
-	// Last scan showed mostly <private> (iOS's unified logging redacts %s/%@
-	// dynamic content by default). {public} annotations only work in
-	// os_log()/os_trace(), not NSLog - switched this loop to os_log to
-	// actually force visibility. Also narrowed from *Hosting* (281 matches,
-	// almost all unrelated system-framework internals) to *HostingController*,
-	// which still catches UIHostingController and its generic-specialization
-	// mangled forms (_TtGC7SwiftUI19UIHostingController<...>) while cutting
-	// the noise.
-	NSInteger found = 0;
-	for (int i = 0; i < numClasses; i++) {
-		const char *name = class_getName(classes[i]);
-		if (name && strstr(name, "HostingController")) {
-			os_log(OS_LOG_DEFAULT, "[Bea][diag] Loaded class matching *HostingController*: %{public}s (superclass: %{public}@)",
-				name, NSStringFromClass(class_getSuperclass(classes[i])));
-			found++;
-		}
-	}
-	os_log(OS_LOG_DEFAULT, "[Bea][diag] Scanned %d loaded classes, %ld matched *HostingController*", numClasses, (long)found);
-	free(classes);
-}
-
-%hook UIViewController
-- (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
-	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
-    if ([viewControllerToPresent isKindOfClass:[UIAlertController class]]) {
-        UIAlertController *alert = (UIAlertController *)viewControllerToPresent;
-        if ([alert.message isEqualToString:@"[\"Unable to load contents\"]"]) {
-            return;
-        }
-    }
-    %orig;
-}
-
-// TEMPORARY - see BeaLogAllHostingClasses above. viewDidAppear: fires on
-// every screen transition, so by the third one plenty of the app (including
-// whatever the feed uses) should be loaded.
-- (void)viewDidAppear:(BOOL)animated {
-	%orig;
-	if (BeaClassScansRemaining > 0) {
-		BeaClassScansRemaining--;
-		os_log(OS_LOG_DEFAULT, "[Bea][diag] viewDidAppear on %{public}@ - scanning loaded classes", NSStringFromClass([self class]));
-		BeaLogAllHostingClasses();
-	}
 }
 %end
 
@@ -283,47 +195,9 @@ BOOL isBlockedPath(const char *path) {
 }
 %end
 
-// UIHostingController lives in SwiftUI.framework, which - unlike BeReal's own
-// classes, always present in the main executable - may be lazily loaded and
-// not yet mapped into the process when %ctor runs (dylibs load very early,
-// typically before main()). objc_getClass returning Nil for it at ctor time
-// doesn't mean the class doesn't exist, just that it isn't registered *yet*.
-// _dyld_register_func_for_add_image's callback fires once for every image
-// already loaded at registration time, then again for every future image
-// load, so this catches SwiftUI whether it's loaded before or after us.
-static BOOL BeaHostingControllerHooked = NO;
-static NSInteger BeaImageCallbackCount = 0;
-
-void BeaTryHookUIHostingController(const struct mach_header *mh, intptr_t vmaddr_slide) {
-	// TEMPORARY - confirms the callback is actually firing at all, since last
-	// time neither the success nor a (missing) failure log ever appeared.
-	BeaImageCallbackCount++;
-	if (BeaImageCallbackCount == 1 || BeaImageCallbackCount % 50 == 0) {
-		NSLog(@"[Bea][diag] dyld add-image callback invocation #%ld", (long)BeaImageCallbackCount);
-	}
-
-	if (BeaHostingControllerHooked) return;
-
-	Class hostingController = objc_getClass("SwiftUI.UIHostingController");
-	NSString *resolvedVia = @"qualified name";
-	if (!hostingController) {
-		hostingController = objc_getClass("UIHostingController");
-		resolvedVia = @"bare name";
-	}
-	if (!hostingController) return;
-
-	BeaHostingControllerHooked = YES;
-	// TEMPORARY - see BeaLogViewHierarchy above.
-	os_log(OS_LOG_DEFAULT, "[Bea][diag] UIHostingController resolved via %{public}@ (image load callback #%ld): %{public}@", resolvedVia, (long)BeaImageCallbackCount, hostingController);
-
-	%init(BeaSwiftUIGroup, UIHostingController = hostingController);
-}
-
 %ctor {
 	%init(
       HomeViewController = objc_getClass("BeReal.HomeViewController"),
 	  AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);
-
-	_dyld_register_func_for_add_image(BeaTryHookUIHostingController);
 }
