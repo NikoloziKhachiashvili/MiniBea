@@ -121,7 +121,7 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 		if (BeaDiagHierarchyDumpsRemaining > 0) {
 			BeaDiagHierarchyDumpsRemaining--;
 			NSLog(@"[Bea][diag] layoutSubviews fired on %@ (subviews=%lu) but found no qualifying UIImageView. Dumping hierarchy:",
-				NSStringFromClass([self class]), (unsigned long)self.subviews.count);
+				NSStringFromClass([self class]), (unsigned long)[[self subviews] count]);
 			BeaLogViewHierarchy(self, 0);
 		}
 		return;
