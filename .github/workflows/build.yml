@@ -10,10 +10,12 @@ permissions:
 jobs:
   build:
     # This repo can't be compiled on the Windows dev machine, so CI is the
-    # only place that verifies it builds. Runs on Linux (theos-action
-    # supports it, and it's faster to boot than a macOS runner); the repo is
-    # public so Actions minutes are free on either.
-    runs-on: ubuntu-latest
+    # only place that verifies it builds. Runs on macOS: theos-action's Linux
+    # path fetches a prebuilt toolchain from kabiroberai/swift-toolchain-linux
+    # v2.1.0, which only publishes ubuntu18.04/20.04 assets - ubuntu-latest is
+    # now 24.04, so that download 404s. The repo is public, so Actions
+    # minutes are free on macOS runners too.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
