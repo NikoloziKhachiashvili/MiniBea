@@ -125,8 +125,10 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 	// alone isn't enough - a scrolled-away post stays in the hierarchy (just
 	// off-screen) until BeReal's own view recycling actually tears it down, so
 	// the button would otherwise stick to the previous post long after it's
-	// scrolled away. Also require the anchor to still be genuinely on-screen.
-	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root] || ![BeaDownloader isViewOnScreen:existingAnchor])) {
+	// scrolled away. Also require the anchor to still be displayed prominently -
+	// the "swipe down" grid view can reuse/resize the same anchor view down to
+	// thumbnail size without it ever leaving the hierarchy or the screen.
+	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingAnchor])) {
 		[existingButton removeFromSuperview];
 		objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -144,6 +146,13 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
 	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:root].firstObject;
 	if (!anchor || !window) return;
+
+	// Reject grid-view thumbnails and small chrome elements as anchors before
+	// doing anything else - the general on-screen filter above is deliberately
+	// permissive (it has to accept the front camera's narrow PiP too), so this
+	// is the one place that requires the anchor to actually be a full-size,
+	// single-post photo.
+	if (![BeaDownloader isAnchorDisplayedProminently:anchor]) return;
 
 	// Search scope stays tied to the post's own local container (not `root`,
 	// which can be a shared pager view spanning more than one post).

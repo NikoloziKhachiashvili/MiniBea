@@ -21,6 +21,13 @@
 // isDescendantOfView: alone stays true long after a post has scrolled off
 // screen, until BeReal's own view recycling actually tears it down.
 + (BOOL)isViewOnScreen:(UIView *)view;
+// Whether anchor isn't just on-screen but displayed at close to full post
+// width - true for the single-post feed this button targets, false for
+// grid-view thumbnails and small chrome elements. Only used to decide
+// whether to create/keep the button - qualifyingImageViewsInView: (and
+// downloadImage:'s search) must keep using isViewOnScreen:, since the front
+// camera's PiP is legitimately much narrower and still has to qualify there.
++ (BOOL)isAnchorDisplayedProminently:(UIView *)anchor;
 // SwiftUI-bridged wrapper/layout views commonly ship with interaction
 // disabled, only re-enabling it on specific interactive children - a button
 // added under such an ancestor never receives touches regardless of its own
