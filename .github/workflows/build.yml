@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     # This repo can't be compiled on the Windows dev machine, so CI is the
@@ -15,9 +18,9 @@ jobs:
       - uses: actions/checkout@v4
 
       # Sets THEOS in $GITHUB_ENV for later steps.
-      # https://github.com/beerpiss/theos-action
+      # https://github.com/beerpiss/theos-action, pinned to the v1.7.0 tag's commit
       - name: Prepare Theos
-        uses: beerpiss/theos-action@main
+        uses: beerpiss/theos-action@e27e8335ec3777c2daabedec89a9178b1d4e70c0 # v1.7.0
 
       - name: Build jailed package (sideload-injectable)
         run: |
