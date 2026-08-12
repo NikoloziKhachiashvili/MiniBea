@@ -74,14 +74,14 @@
 }
 %end
 
-// TEMPORARY diagnostics for tracking down why the download button isn't
-// appearing - the current BeReal build's view hierarchy can't be inspected
-// without a live device, so this substitutes for a debugger/view hierarchy
-// dump. Remove once POVPostHostingCollectionViewCell's actual subview
-// structure is confirmed and the button reliably appears.
-static NSInteger BeaDiagHierarchyDumpsRemaining = 5;
+// TEMPORARY diagnostics - remove once the button reliably appears.
+// Budget is small since UIHostingController fires for every SwiftUI-hosted
+// screen in the app, not just the feed - most calls are expected to find no
+// qualifying image and that's normal, only worth seeing a handful of times.
+static NSInteger BeaDiagHierarchyDumpsRemaining = 3;
 
 void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
+	if (depth > 6) return; // SwiftUI-hosted trees can get deep; cap it
 	NSMutableString *indent = [NSMutableString string];
 	for (NSInteger i = 0; i < depth; i++) [indent appendString:@"  "];
 	NSLog(@"[Bea][diag]%@%@ frame=%@ hidden=%d alpha=%.2f isImageView=%d",
@@ -92,19 +92,29 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 	}
 }
 
-%hook POVPostHostingCollectionViewCell
+// FeaturePOVPresentation.POVPostHostingCollectionViewCell (an earlier attempt)
+// resolved fine but its layoutSubviews never fired - that class turns out to
+// belong to BeReal's separate POV video feature, not the main friends feed,
+// which has no plain UIKit cell class of its own at all. Hooking Apple's
+// public UIHostingController instead - see the interface comment in Tweak.h
+// for why this should be far more stable than guessing at BeReal's internal
+// class names again.
+%hook UIHostingController
 %property (nonatomic, strong) BeaButton *downloadButton;
 %property (nonatomic, strong) UIView *downloadButtonAnchor;
 
-- (void)layoutSubviews {
+- (void)viewDidLayoutSubviews {
 	%orig;
 
-	// UICollectionView reuses cells across different posts as the feed
-	// scrolls. If the image view we last anchored the button to is no longer
-	// part of this cell (its SwiftUI-hosted content got swapped out), tear
-	// down the stale button/constraints and re-attach below against whatever
-	// is showing now.
-	if ([self downloadButton] && (![self downloadButtonAnchor] || ![[self downloadButtonAnchor] isDescendantOfView:self])) {
+	UIView *root = [self view];
+	if (!root) return;
+
+	// Hosting controllers can get their content replaced/rebuilt (e.g. this
+	// one gets reused for a different screen, or the feed page it's hosting
+	// changes). If the image view we last anchored to is no longer part of
+	// this controller's view, tear down and re-attach against what's showing
+	// now.
+	if ([self downloadButton] && (![self downloadButtonAnchor] || ![[self downloadButtonAnchor] isDescendantOfView:root])) {
 		[[self downloadButton] removeFromSuperview];
 		[self setDownloadButton:nil];
 		[self setDownloadButtonAnchor:nil];
@@ -112,17 +122,19 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 
 	if ([self downloadButton]) return;
 
-	// Anchor to the actual largest photo in this cell rather than the cell's
-	// own edges - we don't know what else (captions, header, buttons) BeReal
-	// lays out around it, but we do know where the photo itself ends up.
-	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:self].firstObject;
+	// Anchor to the actual largest qualifying photo rather than this
+	// controller's own view edges - most UIHostingController instances in the
+	// app aren't showing a BeReal photo at all (settings, profile, etc.), and
+	// the >=400pt width filter in qualifyingImageViewsInView: is what keeps
+	// this scoped to real BeReal photos instead of firing everywhere.
+	UIView *anchor = [BeaDownloader qualifyingImageViewsInView:root].firstObject;
 
 	if (!anchor) {
 		if (BeaDiagHierarchyDumpsRemaining > 0) {
 			BeaDiagHierarchyDumpsRemaining--;
-			NSLog(@"[Bea][diag] layoutSubviews fired on %@ (subviews=%lu) but found no qualifying UIImageView. Dumping hierarchy:",
-				NSStringFromClass([self class]), (unsigned long)[[self subviews] count]);
-			BeaLogViewHierarchy(self, 0);
+			NSLog(@"[Bea][diag] viewDidLayoutSubviews fired on UIHostingController (rootView=%@, subviews=%lu) but found no qualifying UIImageView. Dumping hierarchy:",
+				NSStringFromClass([root class]), (unsigned long)[[root subviews] count]);
+			BeaLogViewHierarchy(root, 0);
 		}
 		return;
 	}
@@ -134,7 +146,7 @@ void BeaLogViewHierarchy(UIView *view, NSInteger depth) {
 
 	[self setDownloadButton:downloadButton];
 	[self setDownloadButtonAnchor:anchor];
-	[self addSubview:downloadButton];
+	[root addSubview:downloadButton];
 
 	[NSLayoutConstraint activateConstraints:@[
 		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],
@@ -216,25 +228,24 @@ BOOL isBlockedPath(const char *path) {
 %end
 
 %ctor {
-	// Swift classes are normally exposed to the ObjC runtime as
-	// "Module.ClassName", but fall back to the bare name in case this
-	// particular class wasn't qualified - cheap, and %init just no-ops a
-	// hook group whose class resolves to Nil rather than crashing.
-	Class povPostCell = objc_getClass("FeaturePOVPresentation.POVPostHostingCollectionViewCell");
+	// UIHostingController is Apple's own public class (SwiftUI framework), so
+	// unlike BeReal's own Swift classes it may or may not be module-qualified
+	// for ObjC - try both.
+	Class hostingController = objc_getClass("SwiftUI.UIHostingController");
 	NSString *resolvedVia = @"qualified name";
-	if (!povPostCell) {
-		povPostCell = objc_getClass("POVPostHostingCollectionViewCell");
+	if (!hostingController) {
+		hostingController = objc_getClass("UIHostingController");
 		resolvedVia = @"bare name";
 	}
 	// TEMPORARY - see BeaLogViewHierarchy above.
-	if (povPostCell) {
-		NSLog(@"[Bea][diag] POVPostHostingCollectionViewCell resolved via %@: %@", resolvedVia, povPostCell);
+	if (hostingController) {
+		NSLog(@"[Bea][diag] UIHostingController resolved via %@: %@", resolvedVia, hostingController);
 	} else {
-		NSLog(@"[Bea][diag] POVPostHostingCollectionViewCell FAILED to resolve via either name - the download button hook will never install.");
+		NSLog(@"[Bea][diag] UIHostingController FAILED to resolve via either name - the download button hook will never install.");
 	}
 
 	%init(
-	  POVPostHostingCollectionViewCell = povPostCell,
+	  UIHostingController = hostingController,
       HomeViewController = objc_getClass("BeReal.HomeViewController"),
 	  AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);

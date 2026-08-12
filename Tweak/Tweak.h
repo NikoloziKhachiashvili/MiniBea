@@ -28,14 +28,24 @@ NSDictionary *headers;
 @property (copy) NSString *name;
 @end
 
-// As of BeReal 4.87.0 each feed post renders as a cell in a UICollectionView,
-// with its content hosted from SwiftUI. Earlier versions of this tweak hooked
-// the SwiftUI-private hosting view directly (by hardcoded mangled class name)
-// to inject the download button, but that name belongs to Apple's own
-// SwiftUI.framework internals and isn't stable across iOS versions - hooking
-// this cell class instead (a real, BeReal-owned class) is far less likely to
-// silently break on the next OS or app update.
-@interface POVPostHostingCollectionViewCell : UICollectionViewCell
+// As of BeReal 4.87.0 the main friends feed is a full-screen swipeable pager
+// (FeedsUIPresentation/FeedsFeaturePresentation, PostPagerV2) with no plain
+// UIKit cell class of its own - unlike the separate POV video feature
+// (FeaturePOVPresentation.POVPostHostingCollectionViewCell), which does have
+// one but turned out to be the wrong screen entirely (confirmed via device
+// log: that hook's class resolved fine, but layoutSubviews never fired -
+// the user was never on the POV screen). Rather than keep guessing at
+// BeReal's private internal class names, hook Apple's own public
+// UIHostingController instead: BeReal's binary references
+// SwiftUI.UIHostingController's generic metadata directly, and unlike the
+// deeply-private _UIHostingView specializations the original tweak targeted
+// a year ago, this is documented, stable API. Swift's ObjC bridging for
+// generic classes like this preserves the base class name across concrete
+// specializations, so NSStringFromClass on any UIHostingController<T>
+// instance reports back as plain "UIHostingController" regardless of T -
+// this is the standard, well-established way tweaks hook SwiftUI-hosted
+// content generically, without needing to know anything BeReal-specific.
+@interface UIHostingController : UIViewController
 @property (nonatomic, strong) BeaButton *downloadButton;
 // Strongly held (not weak) so it's always safe to message even if BeReal's
 // own code has since detached it from the hierarchy - see the staleness
