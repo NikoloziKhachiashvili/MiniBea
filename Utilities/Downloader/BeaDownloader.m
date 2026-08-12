@@ -45,12 +45,32 @@
 
 	if (candidates.count == 0) return @[];
 
+	// BeReal's feed is a pager that keeps the next post's content mounted
+	// off-screen for smooth swiping, so `root` (a shared container VC's view)
+	// can contain more than one post's images at once. Restrict to images
+	// whose frame actually falls within the screen so we don't pick up a
+	// neighboring, not-yet-visible post's photo instead of (or alongside) the
+	// one actually being viewed - this is what caused the button to anchor to
+	// every other post, and downloads to grab an extra photo from the post
+	// next to the one tapped.
+	NSMutableArray<UIImageView *> *onScreen = [NSMutableArray array];
+	for (UIImageView *imageView in candidates) {
+		UIWindow *window = imageView.window;
+		if (!window) continue;
+		CGRect frameInWindow = [imageView convertRect:imageView.bounds toView:nil];
+		if (CGRectIntersectsRect(frameInWindow, window.bounds)) {
+			[onScreen addObject:imageView];
+		}
+	}
+
+	if (onScreen.count == 0) return @[];
+
 	// Process visible views before hidden ones so dedupe keeps the copy with
 	// meaningful on-screen geometry (BeReal keeps a hidden copy of whichever
 	// image isn't currently the large frame).
 	NSMutableArray<UIImageView *> *visible = [NSMutableArray array];
 	NSMutableArray<UIImageView *> *hidden = [NSMutableArray array];
-	for (UIImageView *imageView in candidates) {
+	for (UIImageView *imageView in onScreen) {
 		if ([self isView:imageView visibleWithinRoot:root]) {
 			[visible addObject:imageView];
 		} else {
