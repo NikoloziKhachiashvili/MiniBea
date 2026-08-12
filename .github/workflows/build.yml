@@ -19,17 +19,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Sets THEOS in $GITHUB_ENV for later steps.
+      # Sets THEOS in $GITHUB_ENV for later steps. Uses the default theos/sdks
+      # source (small, fast) - it only goes up to 16.5 though, so the missing
+      # iPhoneOS18.0.sdk is fetched separately below.
       # https://github.com/beerpiss/theos-action, pinned to the v1.7.0 tag's commit
       - name: Prepare Theos
         uses: beerpiss/theos-action@e27e8335ec3777c2daabedec89a9178b1d4e70c0 # v1.7.0
-        with:
-          # The Makefile targets iPhoneOS18.0.sdk (TARGET := iphone:clang:18.0:14.0),
-          # but the default theos/sdks repo only goes up to 16.5. xybp888/iOS-SDKs
-          # mirrors newer SDKs including 18.0; pinned to a commit for the same
-          # reason as the action above.
-          theos-sdks: https://github.com/xybp888/iOS-SDKs
-          theos-sdks-ref: 1b92ff4a8928f582876e1d388d1381c6a0c59eb9
+
+      # The Makefile targets iPhoneOS18.0.sdk (TARGET := iphone:clang:18.0:14.0).
+      # xybp888/iOS-SDKs mirrors it, but the repo bundles ~40 SDK versions
+      # (9.3 through 26.5) with no way to download just one - a plain archive
+      # fetch (as theos-action's theos-sdks input does) pulls everything and
+      # takes 10+ minutes. A partial/sparse clone fetches only the blobs for
+      # the one folder we need, pinned to a commit for the same reason as the
+      # action above.
+      - name: Fetch iPhoneOS18.0 SDK
+        run: |
+          git clone --filter=blob:none --sparse --no-checkout https://github.com/xybp888/iOS-SDKs.git /tmp/ios-sdks
+          cd /tmp/ios-sdks
+          git sparse-checkout set iPhoneOS18.0.sdk
+          git checkout 1b92ff4a8928f582876e1d388d1381c6a0c59eb9
+          mkdir -p "$THEOS/sdks"
+          cp -R iPhoneOS18.0.sdk "$THEOS/sdks/"
 
       - name: Build jailed package (sideload-injectable)
         run: |
