@@ -1,5 +1,6 @@
 #import "Tweak.h"
 #import <os/log.h>
+#import <QuartzCore/QuartzCore.h>
 
 %hook PAGDeviceHelper
 + (BOOL)bu_isJailBroken {
@@ -164,8 +165,8 @@ static __weak UIViewController *BeaActiveHomeController = nil;
 // the comment on BeaHomeViewHostingControllerClassName above) but still
 // useful for visibility: this row hides itself (transform/alpha, not removal)
 // when the feed auto-hides its nav chrome on scroll, and mirroring that state
-// is the only way the upload button doesn't end up floating disconnected
-// from the row it's meant to sit next to.
+// (via BeaVisibilitySyncTarget below) is the only way the upload button
+// doesn't end up floating disconnected from the row it's meant to sit next to.
 static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteger depth) {
 	if (!view || depth > 20) return nil;
 	if ([NSStringFromClass([view class]) isEqualToString:className]) return view;
@@ -175,6 +176,59 @@ static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteg
 	}
 	return nil;
 }
+
+// Both floating buttons live directly on the window (needed to out-rank the
+// gating overlay's own z-order), which means neither respects normal view-
+// controller presentation z-ordering on its own. Without this check, a
+// controller whose layout pass fires again mid-presentation-transition
+// (plausible, and observed) can re-assert a tracked button back on top of a
+// freshly-presented modal - e.g. tapping "+" and getting the previous post's
+// download button back on top of the upload screen, only clearing once back
+// on the feed and scrolled to a new post.
+static BOOL BeaHasPresentedModal(UIWindow *window) {
+	return window.rootViewController.presentedViewController != nil;
+}
+
+// viewDidLayoutSubviews only fires when layout is actually invalidated - the
+// feed's own nav row hides itself on scroll via a transform/alpha change,
+// not a frame change, so that hook never re-fires for it and polling there
+// (the previous approach) missed every scroll-hide entirely. Reading the
+// platter's own presentation layer every frame instead reflects whatever's
+// actually rendered on screen right now, regardless of which private iOS 26
+// "Liquid Glass" mechanism drives the hide animation underneath it.
+@interface BeaVisibilitySyncTarget : NSObject
+@end
+
+@implementation BeaVisibilitySyncTarget
+- (void)bea_tick:(CADisplayLink *)link {
+	if (!BeaActiveHomeController) return;
+	BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
+	if (!uploadButton) return;
+
+	UIView *root = BeaActiveHomeController.view;
+	UIWindow *window = root.window;
+	BOOL homeOnScreen = window != nil && [BeaDownloader isViewOnScreen:root] && !BeaHasPresentedModal(window);
+	if (!homeOnScreen) {
+		uploadButton.hidden = YES;
+		return;
+	}
+
+	UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
+	if (!platter) {
+		uploadButton.hidden = YES;
+		return;
+	}
+
+	CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
+	CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
+	BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
+	uploadButton.hidden = !(onScreen && presentation.opacity > 0.05);
+	uploadButton.alpha = presentation.opacity;
+}
+@end
+
+static CADisplayLink *BeaVisibilityDisplayLink;
+static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
@@ -232,23 +286,10 @@ static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteg
 		}
 	}
 
-	// Runs on every layout pass, for any controller - the button previously
-	// never got hidden at all once created, so it kept floating over Chat,
-	// Memories, Profile, and Settings, and stayed fully visible even when the
-	// feed's own nav row auto-hides itself on scroll. Mirrors both: the real
-	// row's actual current visibility, and whether Home is still the
-	// genuinely active screen (its view still on-screen, not just still
-	// technically alive somewhere in the hierarchy - the same distinction
-	// isViewOnScreen: exists for elsewhere in this file).
-	if (BeaActiveHomeController) {
-		BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
-		if (uploadButton) {
-			BOOL homeOnScreen = BeaActiveHomeController.view.window != nil && [BeaDownloader isViewOnScreen:BeaActiveHomeController.view];
-			UIView *platter = homeOnScreen ? BeaFindViewByClassName(BeaActiveHomeController.view.window, @"UIKit.NavigationBarPlatterContainer_v2", 0) : nil;
-			BOOL platterVisible = platter && !platter.hidden && platter.alpha > 0.05 && [BeaDownloader isViewOnScreen:platter];
-			uploadButton.hidden = !(homeOnScreen && platterVisible);
-		}
-	}
+	// Upload button visibility (Home-active, nav row auto-hide) is handled
+	// continuously by BeaVisibilityDisplayLink instead of here - see its
+	// comment for why a layout-pass hook can't observe a transform/alpha-only
+	// hide animation.
 
 	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
 
@@ -258,6 +299,19 @@ static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteg
 	// on every layout pass, since BeReal can (re)mount it at any time, same
 	// as the button z-order issue this file already works around.
 	[BeaDownloader hideGatingOverlaysInView:root excludingImages:qualifyingImages];
+
+	// See BeaHasPresentedModal above - hide every tracked button rather than
+	// only reacting to its own anchor's on-screen state, and skip discovering
+	// new ones while a modal (e.g. the upload screen) covers everything.
+	if (window && BeaHasPresentedModal(window)) {
+		for (BeaButton *trackedButton in [BeaAnchorDownloadButtons objectEnumerator]) {
+			trackedButton.hidden = YES;
+		}
+		return;
+	}
+	for (BeaButton *trackedButton in [BeaAnchorDownloadButtons objectEnumerator]) {
+		trackedButton.hidden = NO;
+	}
 
 	// Global sweep - see the comment on BeaAnchorDownloadButtons above. Runs
 	// regardless of which controller triggered this pass, so a post that
@@ -455,6 +509,14 @@ static void BeaLogMethodsOfClass(Class klass, const char *label) {
 	);
 
 	BeaAnchorDownloadButtons = [NSMapTable weakToStrongObjectsMapTable];
+
+	BeaVisibilitySyncTargetInstance = [BeaVisibilitySyncTarget new];
+	BeaVisibilityDisplayLink = [CADisplayLink displayLinkWithTarget:BeaVisibilitySyncTargetInstance selector:@selector(bea_tick:)];
+	// NSRunLoopCommonModes, not just the default mode - a display link added
+	// only to the default mode pauses for the entire duration of an active
+	// scroll drag (UIScrollView tracking runs the loop in its own tracking
+	// mode), which is exactly when this needs to keep firing.
+	[BeaVisibilityDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 
 	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, dumping candidate gating classes");
 	BeaLogMethodsOfClass(objc_getClass("BeReal.HasPostedUseCaseImpl"), "HasPostedUseCaseImpl");
