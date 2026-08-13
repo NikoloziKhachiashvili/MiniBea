@@ -25,22 +25,29 @@
 }
 
 + (instancetype)uploadButton {
-    BeaButton *uploadButton = [BeaButton buttonWithType:UIButtonTypeRoundedRect];
+    BeaButton *uploadButton = [BeaButton buttonWithType:UIButtonTypeCustom];
     [uploadButton setTitle:@"" forState:UIControlStateNormal];
 
-	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:22];
-	UIImage *plusImage = [UIImage systemImageNamed:@"plus.circle.fill" withConfiguration:config];
+    // Styled to match the existing add-friend/notification-bell icons in the
+    // home feed's top row (solid dark circle, plain glyph) rather than the
+    // download button's floating-over-a-photo look, since this sits directly
+    // alongside those icons rather than over content.
+	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightSemibold];
+	UIImage *plusImage = [UIImage systemImageNamed:@"plus" withConfiguration:config];
 	plusImage = [plusImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 
-	uploadButton.layer.shadowColor = [[UIColor blackColor] CGColor];
-    uploadButton.layer.shadowOffset = CGSizeMake(0, 0);
-    uploadButton.layer.shadowRadius = 3;
-    uploadButton.layer.shadowOpacity = 0.5;
+    uploadButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.4];
 
     [uploadButton setImage:plusImage forState:UIControlStateNormal];
     [uploadButton setTintColor:[UIColor whiteColor]];
-    [uploadButton sizeToFit];
     uploadButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [uploadButton.widthAnchor constraintEqualToConstant:36],
+        [uploadButton.heightAnchor constraintEqualToConstant:36]
+    ]];
+    uploadButton.layer.cornerRadius = 18;
+    uploadButton.layer.masksToBounds = YES;
 
     return uploadButton;
 }

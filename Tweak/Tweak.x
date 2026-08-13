@@ -141,22 +141,6 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 static NSString *const BeaHomeViewHostingControllerClassName = @"_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_";
 static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
 
-// The nav bar's "Liquid Glass" pill (holding the notification bell etc.) is
-// itself real, named UIKit chrome - UIKit.NavigationBarPlatterContainer_v2 -
-// even though its own content is unreachable SwiftUI. Anchoring the upload
-// button just outside its leading edge, instead of a fixed position, means
-// it can't collide with whatever's actually inside the platter regardless of
-// how many icons are in there or where.
-static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteger depth) {
-	if (!view || depth > 20) return nil;
-	if ([NSStringFromClass([view class]) isEqualToString:className]) return view;
-	for (UIView *subview in view.subviews) {
-		UIView *found = BeaFindViewByClassName(subview, className, depth + 1);
-		if (found) return found;
-	}
-	return nil;
-}
-
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
@@ -188,25 +172,25 @@ static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteg
 	}
 
 	if (window && !objc_getAssociatedObject(self, BeaUploadButtonKey) && [NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName]) {
+		// A device screenshot showed the actual layout: a circular add-friend
+		// icon on the leading edge, the (unreachable, SwiftUI-only) "BeReal."
+		// wordmark centered, and the notification bell on the trailing edge,
+		// all in one row just below the safe area. UIKit.NavigationBarPlatterContainer_v2
+		// (tried previously) turned out to be a full-screen-width invisible
+		// wrapper around that whole row, not a small pill around the bell -
+		// anchoring to its leading edge was really anchoring to the screen's
+		// own edge, which is why the button ended up off-screen. There's a
+		// visible gap between the add-friend icon and the wordmark; these
+		// fixed offsets land the button there, clear of both.
 		BeaButton *uploadButton = [BeaButton uploadButton];
 		[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
 		objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		[window addSubview:uploadButton];
 
-		UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
-		if (platter) {
-			os_log(OS_LOG_DEFAULT, "[Bea] upload button anchored to platter frame=%{public}@", NSStringFromCGRect([platter convertRect:platter.bounds toView:nil]));
-			[NSLayoutConstraint activateConstraints:@[
-				[uploadButton.trailingAnchor constraintEqualToAnchor:platter.leadingAnchor constant:-8],
-				[uploadButton.centerYAnchor constraintEqualToAnchor:platter.centerYAnchor]
-			]];
-		} else {
-			os_log(OS_LOG_DEFAULT, "[Bea] upload button: platter not found, using safe-area fallback position");
-			[NSLayoutConstraint activateConstraints:@[
-				[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8],
-				[uploadButton.trailingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.trailingAnchor constant:-16]
-			]];
-		}
+		[NSLayoutConstraint activateConstraints:@[
+			[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
+			[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
+		]];
 	}
 
 	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
