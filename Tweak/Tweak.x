@@ -99,11 +99,32 @@ static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
 static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
 // Temporary: dumps whatever's mounted in the top ~140pt of the screen (nav/
-// title chrome) the first time each controller lays out, so the real "+"
-// upload hook can target the actual current class/structure of the BeReal
-// wordmark logo instead of guessing at a name that changed in the rewrite.
-// Remove once that hook is wired up. Filter device logs for "[BeaDiag]".
-static const void *BeaLoggedTopChromeKey = &BeaLoggedTopChromeKey;
+// title chrome), re-logging per controller whenever that content's shape
+// actually changes, so the real "+" upload hook can target the actual
+// current class/structure of the BeReal wordmark logo instead of guessing at
+// a name that changed in the rewrite. Remove once that hook is wired up.
+// Filter device logs for "[BeaDiag]".
+//
+// The first round logged once per controller on its very first layout pass,
+// which mostly caught still-loading placeholders (a bare activity spinner, a
+// FloatingBarHostingView with zero children yet) - the same async-mounting
+// behavior already seen elsewhere in this file for the gating overlay.
+// Re-logging on any change in descendant count catches content that mounts
+// after that first pass, without spamming on unchanged re-layouts (e.g. from
+// scrolling).
+static const void *BeaLoggedTopChromeCountKey = &BeaLoggedTopChromeCountKey;
+
+static NSInteger BeaCountTopChrome(UIView *view, NSInteger depth) {
+	if (depth > 6) return 0;
+	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+	if (frameInWindow.origin.y > 140) return 0;
+
+	NSInteger count = 1;
+	for (UIView *subview in view.subviews) {
+		count += BeaCountTopChrome(subview, depth + 1);
+	}
+	return count;
+}
 
 static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 	if (!window || depth > 6) return;
@@ -149,10 +170,14 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 
 	UIWindow *window = root.window;
 
-	if (window && !objc_getAssociatedObject(self, BeaLoggedTopChromeKey)) {
-		objc_setAssociatedObject(self, BeaLoggedTopChromeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		os_log(OS_LOG_DEFAULT, "[BeaDiag]==== %{public}@ ====", NSStringFromClass([self class]));
-		BeaLogTopChrome(root, window, 0);
+	if (window) {
+		NSInteger currentTopChromeCount = BeaCountTopChrome(root, 0);
+		NSNumber *lastLoggedCount = objc_getAssociatedObject(self, BeaLoggedTopChromeCountKey);
+		if (!lastLoggedCount || lastLoggedCount.integerValue != currentTopChromeCount) {
+			objc_setAssociatedObject(self, BeaLoggedTopChromeCountKey, @(currentTopChromeCount), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			os_log(OS_LOG_DEFAULT, "[BeaDiag]==== %{public}@ (n=%{public}ld) ====", NSStringFromClass([self class]), (long)currentTopChromeCount);
+			BeaLogTopChrome(root, window, 0);
+		}
 	}
 
 	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
