@@ -66,8 +66,19 @@
 // calling selectors it never declared ("no visible @interface... declares the
 // selector"). Associated objects via the plain runtime API sidestep this
 // entirely - no property/interface declaration needed at all.
-static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
-static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
+//
+// Tracked by the anchor itself (weak keys - stale entries drop out on their
+// own once BeReal deallocates the underlying view) rather than by which
+// controller happened to find it. BeReal nests HomeViewHostingController
+// inside MainTabBarController, and both independently get their own
+// viewDidLayoutSubviews call (confirmed via the [BeaDiag] logging below -
+// "BeReal.MainTabBarController" fires as its own, separate entry) - since
+// MainTabBarController's view contains the exact same post content as a
+// descendant, per-controller tracking meant every ancestor in that chain
+// created its own duplicate button for the same photo. Keying on the anchor
+// means whichever controller's hook runs first wins, and every other
+// controller that rediscovers the same anchor just no-ops.
+static NSMapTable<UIView *, BeaButton *> *BeaAnchorDownloadButtons;
 
 // Temporary: dumps whatever's mounted in the top of the screen (nav/title
 // chrome), re-logging per controller whenever that content's shape actually
@@ -141,6 +152,30 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 static NSString *const BeaHomeViewHostingControllerClassName = @"_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_";
 static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
 
+// Weak so a Home controller BeReal discards gets freed normally - this is
+// only ever consulted, never what keeps it alive. Refreshed on every layout
+// pass of the Home controller itself, but read from *any* controller's pass
+// (see below) since switching away from Home fires the newly-active
+// controller's own hook, not Home's - that's the only way to react to
+// navigation the button isn't itself present for.
+static __weak UIViewController *BeaActiveHomeController = nil;
+
+// Not useful for positioning (its bounding box is the full screen width, see
+// the comment on BeaHomeViewHostingControllerClassName above) but still
+// useful for visibility: this row hides itself (transform/alpha, not removal)
+// when the feed auto-hides its nav chrome on scroll, and mirroring that state
+// is the only way the upload button doesn't end up floating disconnected
+// from the row it's meant to sit next to.
+static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteger depth) {
+	if (!view || depth > 20) return nil;
+	if ([NSStringFromClass([view class]) isEqualToString:className]) return view;
+	for (UIView *subview in view.subviews) {
+		UIView *found = BeaFindViewByClassName(subview, className, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
@@ -171,26 +206,48 @@ static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
 		}
 	}
 
-	if (window && !objc_getAssociatedObject(self, BeaUploadButtonKey) && [NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName]) {
-		// A device screenshot showed the actual layout: a circular add-friend
-		// icon on the leading edge, the (unreachable, SwiftUI-only) "BeReal."
-		// wordmark centered, and the notification bell on the trailing edge,
-		// all in one row just below the safe area. UIKit.NavigationBarPlatterContainer_v2
-		// (tried previously) turned out to be a full-screen-width invisible
-		// wrapper around that whole row, not a small pill around the bell -
-		// anchoring to its leading edge was really anchoring to the screen's
-		// own edge, which is why the button ended up off-screen. There's a
-		// visible gap between the add-friend icon and the wordmark; these
-		// fixed offsets land the button there, clear of both.
-		BeaButton *uploadButton = [BeaButton uploadButton];
-		[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-		objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		[window addSubview:uploadButton];
+	if ([NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName]) {
+		BeaActiveHomeController = self;
 
-		[NSLayoutConstraint activateConstraints:@[
-			[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
-			[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
-		]];
+		if (window && !objc_getAssociatedObject(self, BeaUploadButtonKey)) {
+			// A device screenshot showed the actual layout: a circular add-friend
+			// icon on the leading edge, the (unreachable, SwiftUI-only) "BeReal."
+			// wordmark centered, and the notification bell on the trailing edge,
+			// all in one row just below the safe area. UIKit.NavigationBarPlatterContainer_v2
+			// (tried previously) turned out to be a full-screen-width invisible
+			// wrapper around that whole row, not a small pill around the bell -
+			// anchoring to its leading edge was really anchoring to the screen's
+			// own edge, which is why the button ended up off-screen. There's a
+			// visible gap between the add-friend icon and the wordmark; these
+			// fixed offsets land the button there, clear of both.
+			BeaButton *uploadButton = [BeaButton uploadButton];
+			[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+			objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			[window addSubview:uploadButton];
+
+			[NSLayoutConstraint activateConstraints:@[
+				[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
+				[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
+			]];
+		}
+	}
+
+	// Runs on every layout pass, for any controller - the button previously
+	// never got hidden at all once created, so it kept floating over Chat,
+	// Memories, Profile, and Settings, and stayed fully visible even when the
+	// feed's own nav row auto-hides itself on scroll. Mirrors both: the real
+	// row's actual current visibility, and whether Home is still the
+	// genuinely active screen (its view still on-screen, not just still
+	// technically alive somewhere in the hierarchy - the same distinction
+	// isViewOnScreen: exists for elsewhere in this file).
+	if (BeaActiveHomeController) {
+		BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
+		if (uploadButton) {
+			BOOL homeOnScreen = BeaActiveHomeController.view.window != nil && [BeaDownloader isViewOnScreen:BeaActiveHomeController.view];
+			UIView *platter = homeOnScreen ? BeaFindViewByClassName(BeaActiveHomeController.view.window, @"UIKit.NavigationBarPlatterContainer_v2", 0) : nil;
+			BOOL platterVisible = platter && !platter.hidden && platter.alpha > 0.05 && [BeaDownloader isViewOnScreen:platter];
+			uploadButton.hidden = !(homeOnScreen && platterVisible);
+		}
 	}
 
 	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
@@ -202,22 +259,22 @@ static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
 	// as the button z-order issue this file already works around.
 	[BeaDownloader hideGatingOverlaysInView:root excludingImages:qualifyingImages];
 
-	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
-	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
-
-	// Content can get replaced/rebuilt under a given controller (e.g. cell/
-	// controller reuse, or navigating to different content). isDescendantOfView:
-	// alone isn't enough - a scrolled-away post stays in the hierarchy (just
-	// off-screen) until BeReal's own view recycling actually tears it down, so
-	// the button would otherwise stick to the previous post long after it's
-	// scrolled away. Also require the anchor to still be displayed prominently -
-	// the "swipe down" grid view can reuse/resize the same anchor view down to
-	// thumbnail size without it ever leaving the hierarchy or the screen.
-	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingAnchor])) {
-		[existingButton removeFromSuperview];
-		objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		existingButton = nil;
+	// Global sweep - see the comment on BeaAnchorDownloadButtons above. Runs
+	// regardless of which controller triggered this pass, so a post that
+	// scrolls away gets cleaned up promptly no matter which ancestor
+	// controller's hook happens to fire next, not just the one that
+	// originally created its button.
+	if (BeaAnchorDownloadButtons.count > 0) {
+		NSMutableArray<UIView *> *staleAnchors = [NSMutableArray array];
+		for (UIView *trackedAnchor in BeaAnchorDownloadButtons) {
+			if (![BeaDownloader isAnchorDisplayedProminently:trackedAnchor]) {
+				[staleAnchors addObject:trackedAnchor];
+			}
+		}
+		for (UIView *staleAnchor in staleAnchors) {
+			[[BeaAnchorDownloadButtons objectForKey:staleAnchor] removeFromSuperview];
+			[BeaAnchorDownloadButtons removeObjectForKey:staleAnchor];
+		}
 	}
 
 	// Reject grid-view thumbnails and small chrome elements as anchors - the
@@ -252,23 +309,24 @@ static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
 		}
 	}
 
+	if (!anchor || !window || !localContainer) return;
+
+	BeaButton *existingButton = [BeaAnchorDownloadButtons objectForKey:anchor];
 	if (existingButton) {
 		// A gated ("Post to view") post's lock overlay can mount, or remount,
 		// after our button was added, covering it and silently eating its
 		// taps - reassert front position on every layout pass rather than
 		// trusting it to stick from creation time.
-		if (window) [window bringSubviewToFront:existingButton];
+		[window bringSubviewToFront:existingButton];
 		return;
 	}
-
-	if (!anchor || !window || !localContainer) return;
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
 
-	objc_setAssociatedObject(self, BeaDownloadButtonKey, downloadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	[BeaAnchorDownloadButtons setObject:downloadButton forKey:anchor];
 	[BeaDownloader setSearchRoot:localContainer forButton:downloadButton];
+	os_log(OS_LOG_DEFAULT, "[Bea] download button created: controller=%{public}@ anchor_frame=%{public}@", NSStringFromClass([self class]), NSStringFromCGRect([anchor convertRect:anchor.bounds toView:nil]));
 
 	// Attach to the window, not the post's own container. A gated post's
 	// lock overlay is drawn above the post's content, so no z-order trick
@@ -395,6 +453,8 @@ static void BeaLogMethodsOfClass(Class klass, const char *label) {
 	%init(
       AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);
+
+	BeaAnchorDownloadButtons = [NSMapTable weakToStrongObjectsMapTable];
 
 	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, dumping candidate gating classes");
 	BeaLogMethodsOfClass(objc_getClass("BeReal.HasPostedUseCaseImpl"), "HasPostedUseCaseImpl");
