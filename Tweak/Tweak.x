@@ -1,4 +1,5 @@
 #import "Tweak.h"
+#import <os/log.h>
 
 %hook PAGDeviceHelper
 + (BOOL)bu_isJailBroken {
@@ -97,6 +98,37 @@
 static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
 static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
+// Temporary: dumps whatever's mounted in the top ~140pt of the screen (nav/
+// title chrome) the first time each controller lays out, so the real "+"
+// upload hook can target the actual current class/structure of the BeReal
+// wordmark logo instead of guessing at a name that changed in the rewrite.
+// Remove once that hook is wired up. Filter device logs for "[BeaDiag]".
+static const void *BeaLoggedTopChromeKey = &BeaLoggedTopChromeKey;
+
+static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
+	if (!window || depth > 6) return;
+
+	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+	if (frameInWindow.origin.y > 140) return;
+
+	NSString *accessibilityLabel = view.accessibilityLabel ?: @"";
+	NSString *extra = @"";
+	if ([view isKindOfClass:[UIImageView class]]) {
+		UIImage *image = ((UIImageView *)view).image;
+		extra = [NSString stringWithFormat:@"image=%.0fx%.0f", image.size.width, image.size.height];
+	} else if ([view isKindOfClass:[UILabel class]]) {
+		extra = [NSString stringWithFormat:@"text=%@", ((UILabel *)view).text];
+	}
+
+	NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
+	os_log(OS_LOG_DEFAULT, "[BeaDiag]%{public}@%{public}@ frame=%{public}@ a11y=%{public}@ %{public}@",
+		indent, NSStringFromClass([view class]), NSStringFromCGRect(frameInWindow), accessibilityLabel, extra);
+
+	for (UIView *subview in view.subviews) {
+		BeaLogTopChrome(subview, window, depth + 1);
+	}
+}
+
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
@@ -116,6 +148,12 @@ static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 	if (!root) return;
 
 	UIWindow *window = root.window;
+
+	if (window && !objc_getAssociatedObject(self, BeaLoggedTopChromeKey)) {
+		objc_setAssociatedObject(self, BeaLoggedTopChromeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		os_log(OS_LOG_DEFAULT, "[BeaDiag]==== %{public}@ ====", NSStringFromClass([self class]));
+		BeaLogTopChrome(root, window, 0);
+	}
 
 	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
 
