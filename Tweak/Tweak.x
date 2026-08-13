@@ -268,9 +268,51 @@ BOOL isBlockedPath(const char *path) {
 }
 %end
 
+// Static string analysis of the decrypted BeReal binary (no live device
+// needed for this part) turned up a real, NSObject-rooted Swift class -
+// BeReal.HasPostedUseCaseImpl - wired directly alongside postRepository and
+// blurState in the feed's own dependency graph, making it a much stronger
+// candidate for the actual root of the "Post to view" gate than continuing
+// to fight the rendered UI after the fact. But the class being visible to
+// objc_getClass only proves the *class* is NSObject-rooted - it says nothing
+// about whether any individual method is @objc-dynamic (and therefore
+// hookable via %hook, which works by swizzling objc_msgSend dispatch) versus
+// pure Swift vtable dispatch (invisible to this technique entirely). Rather
+// than guess a selector name and burn a round finding out it's wrong, dump
+// the real method list at launch - this is the same class_copyMethodList
+// technique that resolved the UIHostingController question earlier.
+static void BeaLogMethodsOfClass(Class klass, const char *label) {
+	if (!klass) {
+		os_log(OS_LOG_DEFAULT, "[Bea] %{public}s: class not found at ctor time", label);
+		return;
+	}
+
+	unsigned int instanceCount = 0;
+	Method *instanceMethods = class_copyMethodList(klass, &instanceCount);
+	os_log(OS_LOG_DEFAULT, "[Bea] %{public}s: %{public}u instance method(s)", label, instanceCount);
+	for (unsigned int i = 0; i < instanceCount; i++) {
+		os_log(OS_LOG_DEFAULT, "[Bea]   -[%{public}s %{public}s] type=%{public}s",
+			label, sel_getName(method_getName(instanceMethods[i])), method_getTypeEncoding(instanceMethods[i]));
+	}
+	if (instanceMethods) free(instanceMethods);
+
+	unsigned int classCount = 0;
+	Method *classMethods = class_copyMethodList(object_getClass(klass), &classCount);
+	os_log(OS_LOG_DEFAULT, "[Bea] %{public}s: %{public}u class method(s)", label, classCount);
+	for (unsigned int i = 0; i < classCount; i++) {
+		os_log(OS_LOG_DEFAULT, "[Bea]   +[%{public}s %{public}s] type=%{public}s",
+			label, sel_getName(method_getName(classMethods[i])), method_getTypeEncoding(classMethods[i]));
+	}
+	if (classMethods) free(classMethods);
+}
+
 %ctor {
 	%init(
       HomeViewController = objc_getClass("BeReal.HomeViewController"),
 	  AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);
+
+	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, dumping candidate gating classes");
+	BeaLogMethodsOfClass(objc_getClass("BeReal.HasPostedUseCaseImpl"), "HasPostedUseCaseImpl");
+	BeaLogMethodsOfClass(objc_getClass("BeReal.IsPostViewableUseCaseImpl"), "IsPostViewableUseCaseImpl");
 }
