@@ -21,11 +21,6 @@ NSDictionary *headers;
 + (BOOL)isJailbroken;
 @end
 
-@interface HomeViewController : UIViewController
-@property (nonatomic, retain) UIImageView *ibNavBarLogoImageView;
-- (void)showVersionAlert;
-@end
-
 @interface CAFilter : NSObject
 @property (copy) NSString *name;
 @end

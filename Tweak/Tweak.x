@@ -21,35 +21,6 @@
 }
 %end
 
-%hook HomeViewController
-- (void)viewDidLoad {
-	%orig;
-
-	UIStackView *stackView = (UIStackView *)[[self ibNavBarLogoImageView] superview];
-	stackView.axis = UILayoutConstraintAxisHorizontal;
-	stackView.alignment = UIStackViewAlignmentCenter;
-	
-	UIImageView *plusImage = [[UIImageView alloc] init];
-	plusImage.image = [UIImage systemImageNamed:@"plus.app"];
-	plusImage.translatesAutoresizingMaskIntoConstraints = NO;
-
-	[stackView addArrangedSubview:plusImage];
-
-	UITapGestureRecognizer *tapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
-	[stackView addGestureRecognizer:tapGestureRecognizer];
-	[stackView setUserInteractionEnabled:YES];
-}
-
-%new
-- (void)handleTap:(UITapGestureRecognizer *)gestureRecognizer {
-	if (![[BeaTokenManager sharedInstance] BRAccessToken]) return;
-
-	BeaUploadViewController *beaUploadViewController = [[BeaUploadViewController alloc] init];
-	beaUploadViewController.modalPresentationStyle = UIModalPresentationFullScreen;
-	[self presentViewController:beaUploadViewController animated:YES completion:nil];
-}
-%end
-
 %hook NSMutableURLRequest
 -(void)setAllHTTPHeaderFields:(NSDictionary *)arg1 {
 	%orig;
@@ -159,6 +130,33 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 	}
 }
 
+// The BeReal wordmark/logo itself couldn't be found anywhere in the view
+// hierarchy across three rounds of diagnostic logging on the home feed - just
+// a translucent scroll-edge blur where it visually sits, meaning it's most
+// likely drawn directly by SwiftUI's own renderer with no backing UIView at
+// all (the same reason the gating overlay's text needed accessibilityLabel
+// instead of UILabel.text). Rather than continue chasing an invisible view,
+// the "+" button is added independently to the one real, stable, resolvable
+// class name found for the home feed screen itself.
+static NSString *const BeaHomeViewHostingControllerClassName = @"_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_";
+static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
+
+// The nav bar's "Liquid Glass" pill (holding the notification bell etc.) is
+// itself real, named UIKit chrome - UIKit.NavigationBarPlatterContainer_v2 -
+// even though its own content is unreachable SwiftUI. Anchoring the upload
+// button just outside its leading edge, instead of a fixed position, means
+// it can't collide with whatever's actually inside the platter regardless of
+// how many icons are in there or where.
+static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteger depth) {
+	if (!view || depth > 20) return nil;
+	if ([NSStringFromClass([view class]) isEqualToString:className]) return view;
+	for (UIView *subview in view.subviews) {
+		UIView *found = BeaFindViewByClassName(subview, className, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
@@ -186,6 +184,28 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 			objc_setAssociatedObject(self, BeaLoggedTopChromeCountKey, @(currentTopChromeCount), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 			os_log(OS_LOG_DEFAULT, "[BeaDiag]==== %{public}@ (n=%{public}ld) ====", NSStringFromClass([self class]), (long)currentTopChromeCount);
 			BeaLogTopChrome(root, window, 0);
+		}
+	}
+
+	if (window && !objc_getAssociatedObject(self, BeaUploadButtonKey) && [NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName]) {
+		BeaButton *uploadButton = [BeaButton uploadButton];
+		[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+		objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		[window addSubview:uploadButton];
+
+		UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
+		if (platter) {
+			os_log(OS_LOG_DEFAULT, "[Bea] upload button anchored to platter frame=%{public}@", NSStringFromCGRect([platter convertRect:platter.bounds toView:nil]));
+			[NSLayoutConstraint activateConstraints:@[
+				[uploadButton.trailingAnchor constraintEqualToAnchor:platter.leadingAnchor constant:-8],
+				[uploadButton.centerYAnchor constraintEqualToAnchor:platter.centerYAnchor]
+			]];
+		} else {
+			os_log(OS_LOG_DEFAULT, "[Bea] upload button: platter not found, using safe-area fallback position");
+			[NSLayoutConstraint activateConstraints:@[
+				[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8],
+				[uploadButton.trailingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.trailingAnchor constant:-16]
+			]];
 		}
 	}
 
@@ -278,6 +298,15 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],
 		[[downloadButton topAnchor] constraintEqualToAnchor:anchor.topAnchor constant:11.6]
 	]];
+}
+
+%new
+- (void)bea_uploadButtonTapped {
+	if (![[BeaTokenManager sharedInstance] BRAccessToken]) return;
+
+	BeaUploadViewController *uploadViewController = [[BeaUploadViewController alloc] init];
+	uploadViewController.modalPresentationStyle = UIModalPresentationFullScreen;
+	[self presentViewController:uploadViewController animated:YES completion:nil];
 }
 %end
 
@@ -380,8 +409,7 @@ static void BeaLogMethodsOfClass(Class klass, const char *label) {
 
 %ctor {
 	%init(
-      HomeViewController = objc_getClass("BeReal.HomeViewController"),
-	  AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
+      AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);
 
 	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, dumping candidate gating classes");

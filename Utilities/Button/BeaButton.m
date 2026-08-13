@@ -24,6 +24,27 @@
     return downloadButton;
 }
 
++ (instancetype)uploadButton {
+    BeaButton *uploadButton = [BeaButton buttonWithType:UIButtonTypeRoundedRect];
+    [uploadButton setTitle:@"" forState:UIControlStateNormal];
+
+	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:22];
+	UIImage *plusImage = [UIImage systemImageNamed:@"plus.circle.fill" withConfiguration:config];
+	plusImage = [plusImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+
+	uploadButton.layer.shadowColor = [[UIColor blackColor] CGColor];
+    uploadButton.layer.shadowOffset = CGSizeMake(0, 0);
+    uploadButton.layer.shadowRadius = 3;
+    uploadButton.layer.shadowOpacity = 0.5;
+
+    [uploadButton setImage:plusImage forState:UIControlStateNormal];
+    [uploadButton setTintColor:[UIColor whiteColor]];
+    [uploadButton sizeToFit];
+    uploadButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    return uploadButton;
+}
+
 - (void)toggleVisibilityWithGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {
     if ((gestureRecognizer.numberOfTouches < 2 && [gestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]]) || gestureRecognizer.state == 3) {
         if (gestureRecognizer.state == 2) return;
