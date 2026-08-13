@@ -31,7 +31,20 @@
 			headers = (NSDictionary *)arg1;
 			[[BeaTokenManager sharedInstance] setHeaders:headers];
 		}
-	} 
+	}
+
+	// Piggybacked on this hook rather than only the NSURLSession
+	// factory-method hooks further down, since those never fired at all in
+	// practice - BeReal's own networking likely doesn't route its feed-fetch
+	// through either of the two specific selectors hooked there. This one is
+	// already confirmed firing (it's how the auth token itself gets
+	// captured, and that's been working since early in this project), so it
+	// at least confirms which URLs are actually being called even without
+	// response bodies.
+	NSString *urlString = self.URL.absoluteString ?: @"";
+	if ([urlString rangeOfString:@"bereal.com/api/"].location != NSNotFound) {
+		os_log(OS_LOG_DEFAULT, "[BeaNet] request configured: %{public}@ %{public}@", self.HTTPMethod ?: @"GET", urlString);
+	}
 }
 %end
 
@@ -525,24 +538,24 @@ BOOL isBlockedPath(const char *path) {
 // technique that resolved the UIHostingController question earlier.
 static void BeaLogMethodsOfClass(Class klass, const char *label) {
 	if (!klass) {
-		os_log(OS_LOG_DEFAULT, "[Bea] %{public}s: class not found at ctor time", label);
+		os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: class not found at ctor time", label);
 		return;
 	}
 
 	unsigned int instanceCount = 0;
 	Method *instanceMethods = class_copyMethodList(klass, &instanceCount);
-	os_log(OS_LOG_DEFAULT, "[Bea] %{public}s: %{public}u instance method(s)", label, instanceCount);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: %{public}u instance method(s)", label, instanceCount);
 	for (unsigned int i = 0; i < instanceCount; i++) {
-		os_log(OS_LOG_DEFAULT, "[Bea]   -[%{public}s %{public}s] type=%{public}s",
+		os_log(OS_LOG_DEFAULT, "[BeaClassDump]   -[%{public}s %{public}s] type=%{public}s",
 			label, sel_getName(method_getName(instanceMethods[i])), method_getTypeEncoding(instanceMethods[i]));
 	}
 	if (instanceMethods) free(instanceMethods);
 
 	unsigned int classCount = 0;
 	Method *classMethods = class_copyMethodList(object_getClass(klass), &classCount);
-	os_log(OS_LOG_DEFAULT, "[Bea] %{public}s: %{public}u class method(s)", label, classCount);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: %{public}u class method(s)", label, classCount);
 	for (unsigned int i = 0; i < classCount; i++) {
-		os_log(OS_LOG_DEFAULT, "[Bea]   +[%{public}s %{public}s] type=%{public}s",
+		os_log(OS_LOG_DEFAULT, "[BeaClassDump]   +[%{public}s %{public}s] type=%{public}s",
 			label, sel_getName(method_getName(classMethods[i])), method_getTypeEncoding(classMethods[i]));
 	}
 	if (classMethods) free(classMethods);
@@ -672,6 +685,46 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 	if (!completionHandler || !BeaIsInterestingURL(request)) return %orig;
 	BeaLogNetworkRequest(request, bodyData);
 	return %orig(request, bodyData, BeaWrapNetworkCompletion(request, completionHandler));
+}
+
+// Neither of the two hooks above ever fired in practice on a real device -
+// BeReal's own networking (as opposed to this tweak's own BeaUploadTask,
+// which does use dataTaskWithRequest:completionHandler: for its plain GETs)
+// most likely goes through Swift's async/await URLSession APIs instead,
+// which may not bridge through either of those specific selectors. Added
+// for completeness/cheap coverage; the resume catch-all below is what
+// should actually reveal what's really being called, since it works
+// regardless of which factory method created the task.
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	NSString *urlString = url.absoluteString ?: @"";
+	if (!completionHandler || [urlString rangeOfString:@"bereal.com/api/"].location == NSNotFound) {
+		return %orig;
+	}
+	os_log(OS_LOG_DEFAULT, "[BeaNet] -> GET %{public}@ body=(no body)", urlString);
+	NSURLRequest *syntheticRequest = [NSURLRequest requestWithURL:url];
+	return %orig(url, BeaWrapNetworkCompletion(syntheticRequest, completionHandler));
+}
+%end
+
+// Catch-all: fires for every NSURLSessionTask (data, upload, download)
+// regardless of which NSURLSession factory method created it or whether it
+// uses a completion handler or a delegate - async/await's URLSession.data(for:)
+// and third-party networking layers built on delegate callbacks both still
+// ultimately call resume on a real task object to start it. Can't recover
+// the response body this way (that only reaches whichever completion
+// handler or delegate the task was actually created with), but confirms
+// which URLs/task classes are genuinely in play - concrete data instead of
+// guessing at which specific factory method to hook next.
+%hook NSURLSessionTask
+- (void)resume {
+	NSURL *url = self.currentRequest.URL ?: self.originalRequest.URL;
+	NSString *urlString = url.absoluteString ?: @"";
+	if ([urlString rangeOfString:@"bereal.com/api/"].location != NSNotFound) {
+		NSString *method = self.currentRequest.HTTPMethod ?: self.originalRequest.HTTPMethod ?: @"GET";
+		os_log(OS_LOG_DEFAULT, "[BeaNet] task resumed: class=%{public}@ %{public}@ %{public}@",
+			NSStringFromClass([self class]), method, urlString);
+	}
+	%orig;
 }
 %end
 
