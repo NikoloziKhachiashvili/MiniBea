@@ -68,18 +68,26 @@
 // selector"). Associated objects via the plain runtime API sidestep this
 // entirely - no property/interface declaration needed at all.
 //
-// Tracked by the anchor itself (weak keys - stale entries drop out on their
-// own once BeReal deallocates the underlying view) rather than by which
-// controller happened to find it. BeReal nests HomeViewHostingController
-// inside MainTabBarController, and both independently get their own
-// viewDidLayoutSubviews call (confirmed via the [BeaDiag] logging below -
-// "BeReal.MainTabBarController" fires as its own, separate entry) - since
-// MainTabBarController's view contains the exact same post content as a
-// descendant, per-controller tracking meant every ancestor in that chain
-// created its own duplicate button for the same photo. Keying on the anchor
-// means whichever controller's hook runs first wins, and every other
-// controller that rediscovers the same anchor just no-ops.
-static NSMapTable<UIView *, BeaButton *> *BeaAnchorDownloadButtons;
+// Tracked per-controller (not globally by anchor object identity - that was
+// tried and reverted). BeReal recycles its UIImageView instances as the feed
+// scrolls, reusing the same object for a new post rather than creating a
+// fresh one - a global map keyed by anchor identity treated a recycled view
+// as "already has a button" and never refreshed which post's photos that
+// button actually searches, only what it was created with. That caused
+// exactly what it was meant to prevent: wrong photos downloaded (stale
+// search scope surviving a recycle), missing buttons (a new post silently
+// reusing a tracked object instead of being evaluated fresh), and duplicates
+// (a genuinely new object existing alongside a stale tracked one) - all
+// worse than the single bug it fixed. That original bug - MainTabBarController
+// independently rediscovering the same anchor HomeViewHostingController
+// already has a button for, and creating its own duplicate, since both
+// controllers get their own independent viewDidLayoutSubviews call and
+// MainTabBarController's view contains the same post content as a descendant
+// (confirmed via the [BeaDiag] logging below) - is instead fixed by scoping
+// this whole block to only run on HomeViewHostingController's own pass, so
+// no other controller's pass ever reaches this code at all.
+static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
+static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
 // Temporary: dumps whatever's mounted in the top of the screen (nav/title
 // chrome), re-logging per controller whenever that content's shape actually
@@ -196,6 +204,28 @@ static BOOL BeaHasPresentedModal(UIWindow *window) {
 // platter's own presentation layer every frame instead reflects whatever's
 // actually rendered on screen right now, regardless of which private iOS 26
 // "Liquid Glass" mechanism drives the hide animation underneath it.
+//
+// A CALayer's opacity does not compound into its descendants' own opacity
+// property values - it only affects how they're composited visually. If the
+// fade is actually applied to an ancestor of the platter (e.g. the nav bar
+// or its background) rather than the platter itself, reading the platter's
+// own presentationLayer.opacity directly would misreport 1.0 the entire
+// time. Walking every ancestor up to the window and multiplying their live
+// opacities together mirrors how the fade actually composites on screen,
+// regardless of which specific view in the chain it's applied to.
+static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
+	CGFloat opacity = 1.0;
+	UIView *current = view;
+	while (current && current != window) {
+		if (current.isHidden) return 0.0;
+		CALayer *presentation = current.layer.presentationLayer ?: current.layer;
+		opacity *= presentation.opacity;
+		if (opacity <= 0.01) return 0.0;
+		current = current.superview;
+	}
+	return opacity;
+}
+
 @interface BeaVisibilitySyncTarget : NSObject
 @end
 
@@ -222,8 +252,9 @@ static BOOL BeaHasPresentedModal(UIWindow *window) {
 	CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
 	CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
 	BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
-	uploadButton.hidden = !(onScreen && presentation.opacity > 0.05);
-	uploadButton.alpha = presentation.opacity;
+	CGFloat effectiveOpacity = BeaEffectiveOpacity(platter, window);
+	uploadButton.hidden = !(onScreen && effectiveOpacity > 0.05);
+	uploadButton.alpha = effectiveOpacity;
 }
 @end
 
@@ -260,7 +291,9 @@ static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 		}
 	}
 
-	if ([NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName]) {
+	BOOL isHomeController = [NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName];
+
+	if (isHomeController) {
 		BeaActiveHomeController = self;
 
 		if (window && !objc_getAssociatedObject(self, BeaUploadButtonKey)) {
@@ -300,35 +333,39 @@ static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 	// as the button z-order issue this file already works around.
 	[BeaDownloader hideGatingOverlaysInView:root excludingImages:qualifyingImages];
 
-	// See BeaHasPresentedModal above - hide every tracked button rather than
-	// only reacting to its own anchor's on-screen state, and skip discovering
-	// new ones while a modal (e.g. the upload screen) covers everything.
+	// The download button search/creation only ever needs to run for the
+	// actual home feed controller - see the comment on BeaDownloadButtonKey
+	// above for why letting every controller (including ancestors like
+	// MainTabBarController that contain the same content as a descendant)
+	// run this independently caused duplicate/incorrect buttons.
+	if (!isHomeController) return;
+
+	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
+	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
+
+	// See BeaHasPresentedModal above - the button lives on the window, so it
+	// doesn't respect normal presentation z-ordering on its own and needs to
+	// be explicitly hidden while anything (e.g. the upload screen) is
+	// presented, rather than only reacting to its own anchor's state.
 	if (window && BeaHasPresentedModal(window)) {
-		for (BeaButton *trackedButton in [BeaAnchorDownloadButtons objectEnumerator]) {
-			trackedButton.hidden = YES;
-		}
+		existingButton.hidden = YES;
 		return;
 	}
-	for (BeaButton *trackedButton in [BeaAnchorDownloadButtons objectEnumerator]) {
-		trackedButton.hidden = NO;
-	}
+	if (existingButton) existingButton.hidden = NO;
 
-	// Global sweep - see the comment on BeaAnchorDownloadButtons above. Runs
-	// regardless of which controller triggered this pass, so a post that
-	// scrolls away gets cleaned up promptly no matter which ancestor
-	// controller's hook happens to fire next, not just the one that
-	// originally created its button.
-	if (BeaAnchorDownloadButtons.count > 0) {
-		NSMutableArray<UIView *> *staleAnchors = [NSMutableArray array];
-		for (UIView *trackedAnchor in BeaAnchorDownloadButtons) {
-			if (![BeaDownloader isAnchorDisplayedProminently:trackedAnchor]) {
-				[staleAnchors addObject:trackedAnchor];
-			}
-		}
-		for (UIView *staleAnchor in staleAnchors) {
-			[[BeaAnchorDownloadButtons objectForKey:staleAnchor] removeFromSuperview];
-			[BeaAnchorDownloadButtons removeObjectForKey:staleAnchor];
-		}
+	// Content can get replaced/rebuilt under a given controller (e.g. cell/
+	// controller reuse, or navigating to different content). isDescendantOfView:
+	// alone isn't enough - a scrolled-away post stays in the hierarchy (just
+	// off-screen) until BeReal's own view recycling actually tears it down, so
+	// the button would otherwise stick to the previous post long after it's
+	// scrolled away. Also require the anchor to still be displayed prominently -
+	// the "swipe down" grid view can reuse/resize the same anchor view down to
+	// thumbnail size without it ever leaving the hierarchy or the screen.
+	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingAnchor])) {
+		[existingButton removeFromSuperview];
+		objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		existingButton = nil;
 	}
 
 	// Reject grid-view thumbnails and small chrome elements as anchors - the
@@ -363,24 +400,32 @@ static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 		}
 	}
 
-	if (!anchor || !window || !localContainer) return;
-
-	BeaButton *existingButton = [BeaAnchorDownloadButtons objectForKey:anchor];
 	if (existingButton) {
+		// Refresh which post's photos this button actually searches on every
+		// pass, even when just reusing it rather than recreating it - BeReal
+		// can recycle the same anchor UIImageView instance for a completely
+		// different post as the feed scrolls, and this is what keeps the
+		// button's search scope in sync with whatever it's currently sitting
+		// on instead of silently going stale and downloading whatever post
+		// it was originally created for.
+		if (localContainer) [BeaDownloader setSearchRoot:localContainer forButton:existingButton];
+
 		// A gated ("Post to view") post's lock overlay can mount, or remount,
 		// after our button was added, covering it and silently eating its
 		// taps - reassert front position on every layout pass rather than
 		// trusting it to stick from creation time.
-		[window bringSubviewToFront:existingButton];
+		if (window) [window bringSubviewToFront:existingButton];
 		return;
 	}
+
+	if (!anchor || !window || !localContainer) return;
 
 	BeaButton *downloadButton = [BeaButton downloadButton];
 	downloadButton.layer.zPosition = 99;
 
-	[BeaAnchorDownloadButtons setObject:downloadButton forKey:anchor];
+	objc_setAssociatedObject(self, BeaDownloadButtonKey, downloadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	[BeaDownloader setSearchRoot:localContainer forButton:downloadButton];
-	os_log(OS_LOG_DEFAULT, "[Bea] download button created: controller=%{public}@ anchor_frame=%{public}@", NSStringFromClass([self class]), NSStringFromCGRect([anchor convertRect:anchor.bounds toView:nil]));
 
 	// Attach to the window, not the post's own container. A gated post's
 	// lock overlay is drawn above the post's content, so no z-order trick
@@ -507,8 +552,6 @@ static void BeaLogMethodsOfClass(Class klass, const char *label) {
 	%init(
       AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
 	);
-
-	BeaAnchorDownloadButtons = [NSMapTable weakToStrongObjectsMapTable];
 
 	BeaVisibilitySyncTargetInstance = [BeaVisibilitySyncTarget new];
 	BeaVisibilityDisplayLink = [CADisplayLink displayLinkWithTarget:BeaVisibilitySyncTargetInstance selector:@selector(bea_tick:)];
