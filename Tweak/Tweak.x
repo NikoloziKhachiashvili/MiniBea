@@ -98,26 +98,34 @@
 static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
 static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
-// Temporary: dumps whatever's mounted in the top ~140pt of the screen (nav/
-// title chrome), re-logging per controller whenever that content's shape
-// actually changes, so the real "+" upload hook can target the actual
-// current class/structure of the BeReal wordmark logo instead of guessing at
-// a name that changed in the rewrite. Remove once that hook is wired up.
-// Filter device logs for "[BeaDiag]".
+// Temporary: dumps whatever's mounted in the top of the screen (nav/title
+// chrome), re-logging per controller whenever that content's shape actually
+// changes, so the real "+" upload hook can target the actual current
+// class/structure of the BeReal wordmark logo instead of guessing at a name
+// that changed in the rewrite. Remove once that hook is wired up. Filter
+// device logs for "[BeaDiag]".
 //
-// The first round logged once per controller on its very first layout pass,
-// which mostly caught still-loading placeholders (a bare activity spinner, a
+// Round 1 logged once per controller on its very first layout pass, which
+// mostly caught still-loading placeholders (a bare activity spinner, a
 // FloatingBarHostingView with zero children yet) - the same async-mounting
 // behavior already seen elsewhere in this file for the gating overlay.
-// Re-logging on any change in descendant count catches content that mounts
-// after that first pass, without spamming on unchanged re-layouts (e.g. from
-// scrolling).
+// Round 2 re-logged on any change in descendant count to catch content that
+// mounts later, but kept the same <140pt cutoff - real device data showed
+// the scroll-edge blur effect behind the nav area alone runs up to 210pt
+// tall in this redesigned "Liquid Glass" chrome, so 140 was too shallow and
+// nothing resembling a logo ever showed up under FriendsFeedOverview even
+// once fully loaded. Raised the cutoff to comfortably clear that, and added
+// accessibilityIdentifier alongside accessibilityLabel - SwiftUI content
+// frequently renders without materializing a matching UIImageView/UILabel at
+// all (mirrors the gating-overlay Text not bridging to UILabel elsewhere in
+// this file), so a UI test identifier may be the only signal a plain
+// class/text scan can find.
 static const void *BeaLoggedTopChromeCountKey = &BeaLoggedTopChromeCountKey;
 
 static NSInteger BeaCountTopChrome(UIView *view, NSInteger depth) {
-	if (depth > 6) return 0;
+	if (depth > 8) return 0;
 	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
-	if (frameInWindow.origin.y > 140) return 0;
+	if (frameInWindow.origin.y > 260) return 0;
 
 	NSInteger count = 1;
 	for (UIView *subview in view.subviews) {
@@ -127,12 +135,13 @@ static NSInteger BeaCountTopChrome(UIView *view, NSInteger depth) {
 }
 
 static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
-	if (!window || depth > 6) return;
+	if (!window || depth > 8) return;
 
 	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
-	if (frameInWindow.origin.y > 140) return;
+	if (frameInWindow.origin.y > 260) return;
 
 	NSString *accessibilityLabel = view.accessibilityLabel ?: @"";
+	NSString *accessibilityIdentifier = view.accessibilityIdentifier ?: @"";
 	NSString *extra = @"";
 	if ([view isKindOfClass:[UIImageView class]]) {
 		UIImage *image = ((UIImageView *)view).image;
@@ -142,8 +151,8 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 	}
 
 	NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
-	os_log(OS_LOG_DEFAULT, "[BeaDiag]%{public}@%{public}@ frame=%{public}@ a11y=%{public}@ %{public}@",
-		indent, NSStringFromClass([view class]), NSStringFromCGRect(frameInWindow), accessibilityLabel, extra);
+	os_log(OS_LOG_DEFAULT, "[BeaDiag]%{public}@%{public}@ frame=%{public}@ a11y=%{public}@ id=%{public}@ %{public}@",
+		indent, NSStringFromClass([view class]), NSStringFromCGRect(frameInWindow), accessibilityLabel, accessibilityIdentifier, extra);
 
 	for (UIView *subview in view.subviews) {
 		BeaLogTopChrome(subview, window, depth + 1);
