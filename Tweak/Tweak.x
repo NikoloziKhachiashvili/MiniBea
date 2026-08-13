@@ -548,6 +548,133 @@ static void BeaLogMethodsOfClass(Class klass, const char *label) {
 	if (classMethods) free(classMethods);
 }
 
+// Widens the single-class technique above into a full survey: BeReal's
+// "UseCase"/"Repository" naming (Clean Architecture, one class per business
+// capability) means the app's entire internal feature surface can be mapped
+// by enumerating every loaded class and matching on name, rather than
+// guessing individual class names and burning a round each time one's wrong.
+// "UseCase"/"Repository" are distinctive enough to match unrestricted; the
+// broader keywords (Manager, Service, Client, etc.) are common enough in
+// Apple's own SDK that they're only checked within modules already directly
+// observed in this project's own device logs (BeReal itself, plus the
+// per-feature Presentation modules seen in earlier [BeaDiag] captures) to
+// keep the output signal, not noise.
+static NSArray<NSString *> *BeaKnownModulePrefixes(void) {
+	return @[
+		@"BeReal.",
+		@"RelationshipsPresentation.", @"RelationshipsDomain.", @"RelationshipsData.",
+		@"ProfilePresentation.", @"ProfileDomain.", @"ProfileData.",
+		@"FeedsFeaturePresentation.", @"FeedsFeatureDomain.", @"FeedsFeatureData.",
+		@"MemoriesPresentation.", @"MemoriesDomain.", @"MemoriesData.",
+		@"OnboardingPresentation.", @"ContactPermissionPresentation.",
+		@"ContentDomain.", @"ContentData.", @"NotificationDomain.", @"NotificationData.",
+	];
+}
+
+static void BeaSurveyClasses(void) {
+	unsigned int count = 0;
+	Class *classes = objc_copyClassList(&count);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] scanning %{public}u loaded classes", count);
+
+	NSArray<NSString *> *knownModules = BeaKnownModulePrefixes();
+	NSArray<NSString *> *alwaysKeywords = @[@"UseCase", @"Repository"];
+	NSArray<NSString *> *scopedKeywords = @[@"Manager", @"Service", @"Client", @"Store", @"Provider", @"Interactor", @"Gateway"];
+
+	unsigned long matchCount = 0;
+	for (unsigned int i = 0; i < count; i++) {
+		Class klass = classes[i];
+		const char *rawName = class_getName(klass);
+		if (!rawName) continue;
+		NSString *name = @(rawName);
+
+		BOOL matches = NO;
+		for (NSString *keyword in alwaysKeywords) {
+			if ([name rangeOfString:keyword].location != NSNotFound) { matches = YES; break; }
+		}
+		if (!matches) {
+			BOOL inKnownModule = NO;
+			for (NSString *prefix in knownModules) {
+				if ([name hasPrefix:prefix]) { inKnownModule = YES; break; }
+			}
+			if (inKnownModule) {
+				for (NSString *keyword in scopedKeywords) {
+					if ([name rangeOfString:keyword].location != NSNotFound) { matches = YES; break; }
+				}
+			}
+		}
+		if (!matches) continue;
+
+		matchCount++;
+		BeaLogMethodsOfClass(klass, rawName);
+	}
+
+	free(classes);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}lu matching class(es) total", matchCount);
+}
+
+// Temporary: logs method+URL+status+a truncated body preview for every
+// request/response through the app's own networking, not just the ones this
+// tweak makes itself (BeaUploadTask already logs nothing of its own
+// responses either) - the only way to confirm what BeReal's feed-fetch
+// actually returns (reactions, retake count, full history, etc.) instead of
+// inferring it from the upload payload's schema. Scoped to bereal.com/api/
+// URLs only. Bodies truncated (not full multi-KB+ feed JSON) since this is
+// meant to reveal field *names* and rough shape, not capture complete data.
+//
+// Two entry points, not one - BeaUploadTask itself proves both are in real
+// use: dataTaskWithRequest:completionHandler: for its plain GETs
+// (upload-url, region, last moment), uploadTaskWithRequest:fromData:completionHandler:
+// for the ones with a body (image PUTs, and - the most interesting one to
+// confirm the schema for - the actual POST that creates a post). The body
+// for that second kind arrives as a separate parameter, not on the request
+// itself, hence the explicit override below rather than always reading
+// request.HTTPBody.
+static BOOL BeaIsInterestingURL(NSURLRequest *request) {
+	return [request.URL.absoluteString rangeOfString:@"bereal.com/api/"].location != NSNotFound;
+}
+
+static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
+	NSData *body = explicitBody ?: request.HTTPBody;
+	NSString *bodyPreview = @"(no body)";
+	if (body.length > 0) {
+		NSString *decoded = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"(non-utf8 body)";
+		bodyPreview = decoded.length > 2000 ? [decoded substringToIndex:2000] : decoded;
+	}
+	os_log(OS_LOG_DEFAULT, "[BeaNet] -> %{public}@ %{public}@ body=%{public}@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"", bodyPreview);
+}
+
+typedef void (^BeaNetworkCompletionBlock)(NSData *data, NSURLResponse *response, NSError *error);
+
+static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request, BeaNetworkCompletionBlock completionHandler) {
+	NSString *urlString = request.URL.absoluteString ?: @"";
+	NSString *method = request.HTTPMethod ?: @"GET";
+	return ^(NSData *data, NSURLResponse *response, NSError *error) {
+		NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+		NSString *bodyPreview = @"(no data)";
+		if (data.length > 0) {
+			NSString *decoded = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
+			bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+		}
+		os_log(OS_LOG_DEFAULT, "[BeaNet] <- %{public}@ %{public}@ status=%{public}ld body=%{public}@",
+			method, urlString, (long)httpResponse.statusCode, bodyPreview);
+		completionHandler(data, response, error);
+	};
+}
+
+%hook NSURLSession
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	if (!completionHandler || !BeaIsInterestingURL(request)) return %orig;
+	BeaLogNetworkRequest(request, nil);
+	return %orig(request, BeaWrapNetworkCompletion(request, completionHandler));
+}
+
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	if (!completionHandler || !BeaIsInterestingURL(request)) return %orig;
+	BeaLogNetworkRequest(request, bodyData);
+	return %orig(request, bodyData, BeaWrapNetworkCompletion(request, completionHandler));
+}
+%end
+
 %ctor {
 	%init(
       AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
@@ -561,7 +688,6 @@ static void BeaLogMethodsOfClass(Class klass, const char *label) {
 	// mode), which is exactly when this needs to keep firing.
 	[BeaVisibilityDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 
-	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, dumping candidate gating classes");
-	BeaLogMethodsOfClass(objc_getClass("BeReal.HasPostedUseCaseImpl"), "HasPostedUseCaseImpl");
-	BeaLogMethodsOfClass(objc_getClass("BeReal.IsPostViewableUseCaseImpl"), "IsPostViewableUseCaseImpl");
+	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, surveying UseCase/Repository classes");
+	BeaSurveyClasses();
 }
