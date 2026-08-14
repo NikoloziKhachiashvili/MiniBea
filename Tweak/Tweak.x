@@ -305,12 +305,50 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 static CADisplayLink *BeaVisibilityDisplayLink;
 static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 
-// Populated by BeaCaptureProfilePictureURLIfPresent, defined later in this
-// file alongside the rest of the [BeaNet] response-body capture machinery -
-// declared here instead since viewDidLayoutSubviews below reads them
-// directly and needs them in scope before that point.
-static NSString *BeaLastCapturedProfilePictureURL;
-static NSTimeInterval BeaLastCapturedProfilePictureURLTimestamp;
+// Populated by BeaCaptureFriendProfilePictures, defined later in this file
+// alongside the rest of the [BeaNet] response-body capture machinery -
+// declared here instead since viewDidLayoutSubviews below reads it directly
+// and needs it in scope before that point.
+//
+// Keyed by username AND fullname (lowercased) rather than user ID, both
+// mapping to the same URL - two real device captures (opening both an
+// already-viewed and a genuinely fresh profile) never once showed
+// GET /api/person/profiles/{userId} firing at all, meaning that single
+// earlier sighting of it wasn't reproducible and the profile screen almost
+// certainly just reads from this already-cached friends list instead of
+// making its own fetch. Without a per-profile network call, there's no
+// reliable way to know which user ID is currently open just from watching
+// requests - matching whatever name text is actually showing on screen back
+// to an entry already known from this list is the substitute.
+static NSMutableDictionary<NSString *, NSString *> *BeaFriendProfilePictureURLsByName;
+
+static NSString *BeaProfilePictureURLForDisplayedName(NSString *text) {
+	if (text.length == 0 || BeaFriendProfilePictureURLsByName.count == 0) return nil;
+	NSString *normalized = text.lowercaseString;
+	if ([normalized hasPrefix:@"@"]) normalized = [normalized substringFromIndex:1];
+	return BeaFriendProfilePictureURLsByName[normalized];
+}
+
+// Scans for any UILabel.text or accessibilityLabel matching a cached
+// friend's username/fullname - the profile screen shows the person's name
+// prominently near their picture (confirmed via device screenshots), so this
+// is what actually identifies whose profile is open, not the network layer.
+static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSInteger depth) {
+	if (!view || depth > 15) return nil;
+
+	if ([view isKindOfClass:[UILabel class]]) {
+		NSString *matched = BeaProfilePictureURLForDisplayedName(((UILabel *)view).text);
+		if (matched) return matched;
+	}
+	NSString *a11yMatched = BeaProfilePictureURLForDisplayedName(view.accessibilityLabel);
+	if (a11yMatched) return a11yMatched;
+
+	for (UIView *subview in view.subviews) {
+		NSString *found = BeaFindMatchingFriendProfilePictureURLInView(subview, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
 
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
@@ -389,9 +427,9 @@ static NSTimeInterval BeaLastCapturedProfilePictureURLTimestamp;
 	// profile screen is a different controller entirely with an unknown
 	// class name (same "no plain UIHostingController to hook" situation
 	// documented above). Detected by exactly one qualifying image (a
-	// profile picture, unlike a post's front+back pair) combined with a
-	// profile-picture URL captured recently enough to plausibly belong to
-	// this same screen - see BeaCaptureProfilePictureURLIfPresent.
+	// profile picture, unlike a post's front+back pair) combined with the
+	// currently-displayed name resolving to a cached friend - see
+	// BeaCaptureFriendProfilePictures and BeaFindMatchingFriendProfilePictureURLInView.
 	BeaButton *existingProfilePictureButton = objc_getAssociatedObject(self, BeaProfilePictureButtonKey);
 	UIView *existingProfilePictureAnchor = objc_getAssociatedObject(self, BeaProfilePictureButtonAnchorKey);
 
@@ -411,20 +449,14 @@ static NSTimeInterval BeaLastCapturedProfilePictureURLTimestamp;
 			if (window) [window bringSubviewToFront:existingProfilePictureButton];
 		} else if (window && qualifyingImages.count == 1) {
 			UIView *profilePictureAnchor = qualifyingImages.firstObject;
-			NSTimeInterval age = [NSDate date].timeIntervalSince1970 - BeaLastCapturedProfilePictureURLTimestamp;
-			if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && BeaLastCapturedProfilePictureURL.length > 0 && age >= 0 && age < 3.0) {
+			NSString *matchedURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
+			if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && matchedURL.length > 0) {
 				BeaButton *profilePictureButton = [BeaButton profilePictureDownloadButton];
 				profilePictureButton.layer.zPosition = 99;
-				[BeaDownloader setProfilePictureURLString:BeaLastCapturedProfilePictureURL forButton:profilePictureButton];
+				[BeaDownloader setProfilePictureURLString:matchedURL forButton:profilePictureButton];
 
 				objc_setAssociatedObject(self, BeaProfilePictureButtonKey, profilePictureButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 				objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, profilePictureAnchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-				// Consumed - clears the global cache so a later, unrelated
-				// single-image screen (e.g. a fullscreen post viewer) can't
-				// accidentally pick up the same URL again outside its actual
-				// time window.
-				BeaLastCapturedProfilePictureURL = nil;
 
 				[window addSubview:profilePictureButton];
 				[window bringSubviewToFront:profilePictureButton];
@@ -743,36 +775,57 @@ static BOOL BeaIsInterestingURL(NSURLRequest *request) {
 	return BeaURLIsInteresting(request.URL);
 }
 
-// BeaLastCapturedProfilePictureURL/Timestamp are declared earlier in this
-// file, right before %hook UIViewController - viewDidLayoutSubviews reads
-// them directly, and that hook comes before this function in the file.
+// BeaFriendProfilePictureURLsByName is declared earlier in this file, right
+// before %hook UIViewController - viewDidLayoutSubviews reads it directly
+// via BeaFindMatchingFriendProfilePictureURLInView, and that hook comes
+// before this function in the file.
 //
-// Captured off GET /api/person/profiles/{userId}?withPost=true specifically
-// (seen firing whenever a friend's profile screen opens), not any response
-// containing a "profilePicture" field generally - the friends-list response
-// (/api/relationships/friends/) has one per friend in a whole array, and
-// capturing from there would grab an arbitrary friend's picture instead of
-// whichever profile is actually on screen. A single global "most recently
-// seen" value (not keyed by user) is enough since only one profile can
-// realistically be open at a time; cleared once consumed by a button (see
-// Tweak.x's viewDidLayoutSubviews) so a stale value can't silently reattach
-// to some later, unrelated single-image screen.
-static void BeaCaptureProfilePictureURLIfPresent(NSURL *requestURL, NSData *body) {
+// Originally scoped to GET /api/person/profiles/{userId}?withPost=true,
+// which seemed to fire once in an early capture - but two later captures
+// (one opening an already-viewed profile, one opening a genuinely fresh one)
+// never showed that endpoint fire at all, meaning that sighting wasn't
+// reproducible. GET /api/relationships/friends/?page, which reliably does
+// fire (re-polled periodically) and already carries a profilePicture.url per
+// friend, is the real source - the profile screen most likely just reads
+// from this already-cached list rather than making its own fetch.
+static void BeaCaptureFriendProfilePictures(NSURL *requestURL, NSData *body) {
 	if (body.length == 0) return;
-	if ([requestURL.path rangeOfString:@"/api/person/profiles/"].location == NSNotFound) return;
+	if ([requestURL.path rangeOfString:@"/api/relationships/friends/"].location == NSNotFound) return;
 
 	id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
 	if (![json isKindOfClass:[NSDictionary class]]) return;
 
-	id profilePicture = ((NSDictionary *)json)[@"profilePicture"];
-	if (![profilePicture isKindOfClass:[NSDictionary class]]) return;
+	id friends = ((NSDictionary *)json)[@"data"];
+	if (![friends isKindOfClass:[NSArray class]]) return;
 
-	id urlValue = ((NSDictionary *)profilePicture)[@"url"];
-	if (![urlValue isKindOfClass:[NSString class]] || [(NSString *)urlValue length] == 0) return;
+	if (!BeaFriendProfilePictureURLsByName) BeaFriendProfilePictureURLsByName = [NSMutableDictionary new];
 
-	BeaLastCapturedProfilePictureURL = (NSString *)urlValue;
-	BeaLastCapturedProfilePictureURLTimestamp = [NSDate date].timeIntervalSince1970;
-	os_log(OS_LOG_DEFAULT, "[BeaNet] captured profile picture URL: %{public}@", BeaLastCapturedProfilePictureURL);
+	NSInteger captured = 0;
+	for (id friendEntry in (NSArray *)friends) {
+		if (![friendEntry isKindOfClass:[NSDictionary class]]) continue;
+		NSDictionary *friendDict = (NSDictionary *)friendEntry;
+
+		id profilePicture = friendDict[@"profilePicture"];
+		if (![profilePicture isKindOfClass:[NSDictionary class]]) continue;
+		id urlValue = ((NSDictionary *)profilePicture)[@"url"];
+		if (![urlValue isKindOfClass:[NSString class]] || [(NSString *)urlValue length] == 0) continue;
+
+		id username = friendDict[@"username"];
+		id fullname = friendDict[@"fullname"];
+		BOOL storedAny = NO;
+		if ([username isKindOfClass:[NSString class]] && [(NSString *)username length] > 0) {
+			BeaFriendProfilePictureURLsByName[[(NSString *)username lowercaseString]] = (NSString *)urlValue;
+			storedAny = YES;
+		}
+		if ([fullname isKindOfClass:[NSString class]] && [(NSString *)fullname length] > 0) {
+			BeaFriendProfilePictureURLsByName[[(NSString *)fullname lowercaseString]] = (NSString *)urlValue;
+			storedAny = YES;
+		}
+		if (storedAny) captured++;
+	}
+	if (captured > 0) {
+		os_log(OS_LOG_DEFAULT, "[BeaNet] captured %{public}ld friend profile picture URL(s)", (long)captured);
+	}
 }
 
 static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
@@ -800,7 +853,7 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 		}
 		os_log(OS_LOG_DEFAULT, "[BeaNet] <- %{public}@ %{public}@ status=%{public}ld body=%{public}@",
 			method, urlString, (long)httpResponse.statusCode, bodyPreview);
-		BeaCaptureProfilePictureURLIfPresent(requestURL, data);
+		BeaCaptureFriendProfilePictures(requestURL, data);
 		completionHandler(data, response, error);
 	};
 }
@@ -950,7 +1003,7 @@ static void BeaHookedDidComplete(id self, SEL _cmd, NSURLSession *session, NSURL
 			(long)httpResponse.statusCode,
 			error.localizedDescription ?: @"(none)",
 			bodyPreview);
-		BeaCaptureProfilePictureURLIfPresent(url, body);
+		BeaCaptureFriendProfilePictures(url, body);
 	}
 	IMP orig = BeaFindOriginalIMP(BeaOrigDidCompleteByClass, [self class]);
 	if (orig) ((BeaDidCompleteIMP)orig)(self, _cmd, session, task, error);
