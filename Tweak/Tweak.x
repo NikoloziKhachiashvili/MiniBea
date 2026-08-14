@@ -2,6 +2,19 @@
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
 
+// Host-based check for whether a URL belongs to BeReal's own API surface,
+// shared by every [BeaNet] diagnostic hook below. Checking just the host
+// (rather than a raw substring search across the whole URL) avoids matching
+// an unrelated domain that happens to embed "bereal.com" somewhere in a
+// query string, and keeps this scoped to bereal.com and its subdomains (e.g.
+// mobile-l7.bereal.com) - not cdn.bereal.network or storage.googleapis.com,
+// which are different domains entirely and would otherwise flood the log
+// with image/upload traffic.
+static BOOL BeaURLIsInteresting(NSURL *url) {
+	NSString *host = url.host.lowercaseString;
+	return host != nil && [host hasSuffix:@"bereal.com"];
+}
+
 %hook PAGDeviceHelper
 + (BOOL)bu_isJailBroken {
 	return NO;
@@ -42,16 +55,17 @@
 	// at least confirms which URLs are actually being called even without
 	// response bodies.
 	//
-	// Widened from "bereal.com/api/" to plain "bereal.com" - a real capture
-	// showed heavy feed/reaction/unblur activity but zero matching traffic
-	// under /api/, even though person/me, settings, and content/posts all
-	// did. The class survey found *ServiceAsyncClient classes (Relationships,
-	// Discovery), which is the naming convention gRPC/Connect-RPC codegen
-	// uses - those clients typically hit paths like
-	// /relationships.v1.RelationshipsService/Method on the same host, not
-	// /api/..., which would explain the total silence under the old filter.
+	// Widened from a raw "bereal.com/api/" substring match to the host-based
+	// BeaURLIsInteresting check - a real capture showed heavy feed/reaction/
+	// unblur activity but zero matching traffic under /api/, even though
+	// person/me, settings, and content/posts all did. The class survey found
+	// *ServiceAsyncClient classes (Relationships, Discovery), the naming
+	// convention gRPC/Connect-RPC codegen uses - those clients typically hit
+	// paths like /relationships.v1.RelationshipsService/Method on the same
+	// host, not /api/..., which would explain the total silence under the
+	// old filter.
 	NSString *urlString = self.URL.absoluteString ?: @"";
-	if ([urlString rangeOfString:@"bereal.com"].location != NSNotFound) {
+	if (BeaURLIsInteresting(self.URL)) {
 		os_log(OS_LOG_DEFAULT, "[BeaNet] request configured: %{public}@ %{public}@", self.HTTPMethod ?: @"GET", urlString);
 	}
 }
@@ -655,7 +669,7 @@ static void BeaSurveyClasses(void) {
 // itself, hence the explicit override below rather than always reading
 // request.HTTPBody.
 static BOOL BeaIsInterestingURL(NSURLRequest *request) {
-	return [request.URL.absoluteString rangeOfString:@"bereal.com"].location != NSNotFound;
+	return BeaURLIsInteresting(request.URL);
 }
 
 static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
@@ -699,6 +713,14 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 	return %orig(request, bodyData, BeaWrapNetworkCompletion(request, completionHandler));
 }
 
+// Same completion-handler shape as the fromData: variant above, just a
+// from-file upload instead - cheap extra coverage for the same reason.
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	if (!completionHandler || !BeaIsInterestingURL(request)) return %orig;
+	BeaLogNetworkRequest(request, nil);
+	return %orig(request, fileURL, BeaWrapNetworkCompletion(request, completionHandler));
+}
+
 // Neither of the two hooks above ever fired in practice on a real device -
 // BeReal's own networking (as opposed to this tweak's own BeaUploadTask,
 // which does use dataTaskWithRequest:completionHandler: for its plain GETs)
@@ -709,7 +731,7 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 // regardless of which factory method created the task.
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
 	NSString *urlString = url.absoluteString ?: @"";
-	if (!completionHandler || [urlString rangeOfString:@"bereal.com"].location == NSNotFound) {
+	if (!completionHandler || !BeaURLIsInteresting(url)) {
 		return %orig;
 	}
 	os_log(OS_LOG_DEFAULT, "[BeaNet] -> GET %{public}@ body=(no body)", urlString);
@@ -731,7 +753,7 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 - (void)resume {
 	NSURL *url = self.currentRequest.URL ?: self.originalRequest.URL;
 	NSString *urlString = url.absoluteString ?: @"";
-	if ([urlString rangeOfString:@"bereal.com"].location != NSNotFound) {
+	if (BeaURLIsInteresting(url)) {
 		NSString *method = self.currentRequest.HTTPMethod ?: self.originalRequest.HTTPMethod ?: @"GET";
 		os_log(OS_LOG_DEFAULT, "[BeaNet] task resumed: class=%{public}@ %{public}@ %{public}@",
 			NSStringFromClass([self class]), method, urlString);
@@ -739,6 +761,131 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 	%orig;
 }
 %end
+
+// Every genuinely BeReal-initiated call (as opposed to this tweak's own
+// upload code, which does hit the completion-handler factory methods above)
+// has -resume/header-hook confirming a task was created and started, but
+// never produces a body through any of the three completion-handler hooks -
+// consistent with BeReal routing its own networking through a delegate-based
+// task (no completion handler passed at creation, response delivered via
+// URLSessionDataDelegate/URLSessionTaskDelegate callbacks instead), which is
+// exactly the pattern Swift's `URLSession.data(for:)` async bridge is
+// documented to use internally. The concrete class implementing that
+// delegate isn't known ahead of time (most likely a private class inside
+// Apple's Concurrency bridge, or BeReal's own network layer), so rather than
+// naming one in %hook, this scans every loaded class at startup for whichever
+// ones directly declare the two callbacks below and swizzles them in place.
+//
+// Done with plain ObjC runtime calls (method_setImplementation), not
+// CydiaSubstrate's MSHookMessageEx - the JAILED=1 build this project ships
+// (see Makefile) deliberately avoids that dependency via Logos's "internal"
+// generator, so MSHookMessageEx isn't linked for the build actually used to
+// test on-device. Scoped to classes that DIRECTLY declare the selector
+// (class_copyMethodList on the class itself, not class_getInstanceMethod's
+// hierarchy walk) rather than every subclass that merely inherits it -
+// otherwise a single shared base implementation could get redundantly
+// re-hooked once per subclass. Original IMPs are stored per-class and looked
+// up by walking from the calling instance's actual class up to the nearest
+// hooked ancestor, so calling through %orig-equivalent stays correct even
+// for subclass instances that never got their own override.
+typedef void (*BeaDidReceiveDataIMP)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *);
+typedef void (*BeaDidCompleteIMP)(id, SEL, NSURLSession *, NSURLSessionTask *, NSError *);
+
+// Keyed by class NAME (NSString), not the Class object itself - a raw Class
+// pointer doesn't reliably conform to NSCopying, which NSDictionary requires
+// of its keys, and using one anyway is a well-known way to crash on insert.
+static NSMutableDictionary<NSString *, NSValue *> *BeaOrigDidReceiveDataByClass;
+static NSMutableDictionary<NSString *, NSValue *> *BeaOrigDidCompleteByClass;
+static NSMutableDictionary<NSNumber *, NSMutableData *> *BeaPendingTaskBodies;
+
+static IMP BeaFindOriginalIMP(NSMutableDictionary<NSString *, NSValue *> *table, Class klass) {
+	while (klass) {
+		NSValue *value = table[NSStringFromClass(klass)];
+		if (value) return (IMP)[value pointerValue];
+		klass = class_getSuperclass(klass);
+	}
+	return NULL;
+}
+
+static void BeaHookedDidReceiveData(id self, SEL _cmd, NSURLSession *session, NSURLSessionDataTask *dataTask, NSData *data) {
+	NSURL *url = dataTask.currentRequest.URL ?: dataTask.originalRequest.URL;
+	if (url && BeaURLIsInteresting(url)) {
+		@synchronized (BeaPendingTaskBodies) {
+			NSNumber *key = @(dataTask.taskIdentifier);
+			NSMutableData *buffer = BeaPendingTaskBodies[key];
+			if (!buffer) {
+				buffer = [NSMutableData new];
+				BeaPendingTaskBodies[key] = buffer;
+			}
+			[buffer appendData:data];
+		}
+	}
+	IMP orig = BeaFindOriginalIMP(BeaOrigDidReceiveDataByClass, [self class]);
+	if (orig) ((BeaDidReceiveDataIMP)orig)(self, _cmd, session, dataTask, data);
+}
+
+static void BeaHookedDidComplete(id self, SEL _cmd, NSURLSession *session, NSURLSessionTask *task, NSError *error) {
+	NSURL *url = task.currentRequest.URL ?: task.originalRequest.URL;
+	if (url && BeaURLIsInteresting(url)) {
+		NSNumber *key = @(task.taskIdentifier);
+		NSData *body = nil;
+		@synchronized (BeaPendingTaskBodies) {
+			body = BeaPendingTaskBodies[key];
+			[BeaPendingTaskBodies removeObjectForKey:key];
+		}
+		NSHTTPURLResponse *httpResponse = [task.response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)task.response : nil;
+		NSString *bodyPreview = @"(no data)";
+		if (body.length > 0) {
+			NSString *decoded = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
+			bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+		}
+		os_log(OS_LOG_DEFAULT, "[BeaNet] <-delegate %{public}@ %{public}@ status=%{public}ld err=%{public}@ body=%{public}@",
+			task.currentRequest.HTTPMethod ?: task.originalRequest.HTTPMethod ?: @"GET",
+			url.absoluteString ?: @"",
+			(long)httpResponse.statusCode,
+			error.localizedDescription ?: @"(none)",
+			bodyPreview);
+	}
+	IMP orig = BeaFindOriginalIMP(BeaOrigDidCompleteByClass, [self class]);
+	if (orig) ((BeaDidCompleteIMP)orig)(self, _cmd, session, task, error);
+}
+
+// One class_copyMethodList call per class (checking both selectors against
+// that single list), not one call per selector - the class list this walks
+// is the same ~127k classes BeaSurveyClasses() already scans, so doubling
+// the per-class work there would be a real, avoidable startup-latency cost.
+static void BeaHookURLSessionDelegateCallbacks(void) {
+	BeaPendingTaskBodies = [NSMutableDictionary new];
+	BeaOrigDidReceiveDataByClass = [NSMutableDictionary new];
+	BeaOrigDidCompleteByClass = [NSMutableDictionary new];
+	SEL didReceiveDataSel = @selector(URLSession:dataTask:didReceiveData:);
+	SEL didCompleteSel = @selector(URLSession:task:didCompleteWithError:);
+	unsigned int classCount = 0;
+	Class *classes = objc_copyClassList(&classCount);
+	int hookedReceive = 0, hookedComplete = 0;
+	for (unsigned int i = 0; i < classCount; i++) {
+		Class klass = classes[i];
+		unsigned int methodCount = 0;
+		Method *methods = class_copyMethodList(klass, &methodCount);
+		for (unsigned int m = 0; m < methodCount; m++) {
+			SEL sel = method_getName(methods[m]);
+			if (sel == didReceiveDataSel) {
+				BeaOrigDidReceiveDataByClass[NSStringFromClass(klass)] = [NSValue valueWithPointer:method_getImplementation(methods[m])];
+				method_setImplementation(methods[m], (IMP)BeaHookedDidReceiveData);
+				hookedReceive++;
+				os_log(OS_LOG_DEFAULT, "[BeaNet] hooked didReceiveData: on %{public}@", NSStringFromClass(klass));
+			} else if (sel == didCompleteSel) {
+				BeaOrigDidCompleteByClass[NSStringFromClass(klass)] = [NSValue valueWithPointer:method_getImplementation(methods[m])];
+				method_setImplementation(methods[m], (IMP)BeaHookedDidComplete);
+				hookedComplete++;
+				os_log(OS_LOG_DEFAULT, "[BeaNet] hooked didCompleteWithError: on %{public}@", NSStringFromClass(klass));
+			}
+		}
+		free(methods);
+	}
+	free(classes);
+	os_log(OS_LOG_DEFAULT, "[BeaNet] delegate hook scan complete: receive=%{public}d complete=%{public}d", hookedReceive, hookedComplete);
+}
 
 %ctor {
 	%init(
@@ -752,6 +899,15 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 	// scroll drag (UIScrollView tracking runs the loop in its own tracking
 	// mode), which is exactly when this needs to keep firing.
 	[BeaVisibilityDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+
+	// Unconditional, no URL filter involved - fires the moment %ctor runs
+	// regardless of what network traffic ever happens. Exists specifically so
+	// a future capture with zero [BeaNet] lines can be read unambiguously: if
+	// even this is missing, the tweak itself never loaded (install/signing
+	// issue); if this is present but nothing else follows, the filter
+	// genuinely matched nothing.
+	os_log(OS_LOG_DEFAULT, "[BeaNet] network hooks installed");
+	BeaHookURLSessionDelegateCallbacks();
 
 	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, surveying UseCase/Repository classes");
 	BeaSurveyClasses();
