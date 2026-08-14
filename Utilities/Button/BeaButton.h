@@ -3,6 +3,7 @@
 
 @interface BeaButton : UIButton
 + (instancetype)downloadButton;
++ (instancetype)profilePictureDownloadButton;
 + (instancetype)uploadButton;
 - (void)toggleVisibilityWithGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer;
 @end

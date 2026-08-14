@@ -24,6 +24,33 @@
     return downloadButton;
 }
 
++ (instancetype)profilePictureDownloadButton {
+    // Same visual treatment as downloadButton (floating over a photo, not
+    // sitting in a chrome row like uploadButton) since this sits directly
+    // over the profile picture the same way the post download button sits
+    // over a post's photo.
+    BeaButton *downloadButton = [BeaButton buttonWithType:UIButtonTypeRoundedRect];
+    [downloadButton setTitle:@"" forState:UIControlStateNormal];
+
+	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:19];
+	UIImage *downloadImage = [UIImage systemImageNamed:@"arrow.down.circle.fill" withConfiguration:config];
+	downloadImage = [downloadImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+
+	downloadButton.layer.shadowColor = [[UIColor blackColor] CGColor];
+    downloadButton.layer.shadowOffset = CGSizeMake(0, 0);
+    downloadButton.layer.shadowRadius = 3;
+    downloadButton.layer.shadowOpacity = 0.5;
+
+    [downloadButton setImage:downloadImage forState:UIControlStateNormal];
+    [downloadButton setTintColor:[UIColor whiteColor]];
+    [downloadButton sizeToFit];
+	downloadButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
+    downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [downloadButton addTarget:[BeaDownloader class] action:@selector(downloadProfilePicture:) forControlEvents:UIControlEventTouchUpInside];
+
+    return downloadButton;
+}
+
 + (instancetype)uploadButton {
     BeaButton *uploadButton = [BeaButton buttonWithType:UIButtonTypeCustom];
     [uploadButton setTitle:@"" forState:UIControlStateNormal];

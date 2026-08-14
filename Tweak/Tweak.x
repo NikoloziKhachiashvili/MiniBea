@@ -125,6 +125,14 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
 static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
+// Separate from the two keys above - the profile picture button is a
+// different controller entirely from Home (whatever the profile screen's own
+// class is), tracked the same per-controller way to avoid the exact stray/
+// duplicate-button problems documented in KNOWN_ISSUES.md for the post
+// download button.
+static const void *BeaProfilePictureButtonKey = &BeaProfilePictureButtonKey;
+static const void *BeaProfilePictureButtonAnchorKey = &BeaProfilePictureButtonAnchorKey;
+
 // Temporary: dumps whatever's mounted in the top of the screen (nav/title
 // chrome), re-logging per controller whenever that content's shape actually
 // changes, so the real "+" upload hook can target the actual current
@@ -369,11 +377,67 @@ static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 	// as the button z-order issue this file already works around.
 	[BeaDownloader hideGatingOverlaysInView:root excludingImages:qualifyingImages];
 
-	// The download button search/creation only ever needs to run for the
-	// actual home feed controller - see the comment on BeaDownloadButtonKey
-	// above for why letting every controller (including ancestors like
-	// MainTabBarController that contain the same content as a descendant)
-	// run this independently caused duplicate/incorrect buttons.
+	// Profile picture download button - deliberately NOT scoped to
+	// isHomeController like the post download button below, since the
+	// profile screen is a different controller entirely with an unknown
+	// class name (same "no plain UIHostingController to hook" situation
+	// documented above). Detected by exactly one qualifying image (a
+	// profile picture, unlike a post's front+back pair) combined with a
+	// profile-picture URL captured recently enough to plausibly belong to
+	// this same screen - see BeaCaptureProfilePictureURLIfPresent.
+	BeaButton *existingProfilePictureButton = objc_getAssociatedObject(self, BeaProfilePictureButtonKey);
+	UIView *existingProfilePictureAnchor = objc_getAssociatedObject(self, BeaProfilePictureButtonAnchorKey);
+
+	if (window && BeaHasPresentedModal(window)) {
+		existingProfilePictureButton.hidden = YES;
+	} else {
+		if (existingProfilePictureButton) existingProfilePictureButton.hidden = NO;
+
+		if (existingProfilePictureButton && (!existingProfilePictureAnchor || ![existingProfilePictureAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingProfilePictureAnchor])) {
+			[existingProfilePictureButton removeFromSuperview];
+			objc_setAssociatedObject(self, BeaProfilePictureButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			existingProfilePictureButton = nil;
+		}
+
+		if (existingProfilePictureButton) {
+			if (window) [window bringSubviewToFront:existingProfilePictureButton];
+		} else if (window && qualifyingImages.count == 1) {
+			UIView *profilePictureAnchor = qualifyingImages.firstObject;
+			NSTimeInterval age = [NSDate date].timeIntervalSince1970 - BeaLastCapturedProfilePictureURLTimestamp;
+			if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && BeaLastCapturedProfilePictureURL.length > 0 && age >= 0 && age < 3.0) {
+				BeaButton *profilePictureButton = [BeaButton profilePictureDownloadButton];
+				profilePictureButton.layer.zPosition = 99;
+				[BeaDownloader setProfilePictureURLString:BeaLastCapturedProfilePictureURL forButton:profilePictureButton];
+
+				objc_setAssociatedObject(self, BeaProfilePictureButtonKey, profilePictureButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, profilePictureAnchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+				// Consumed - clears the global cache so a later, unrelated
+				// single-image screen (e.g. a fullscreen post viewer) can't
+				// accidentally pick up the same URL again outside its actual
+				// time window.
+				BeaLastCapturedProfilePictureURL = nil;
+
+				[window addSubview:profilePictureButton];
+				[window bringSubviewToFront:profilePictureButton];
+
+				// Bottom-trailing corner, not top-trailing like the post
+				// download button - BeReal's own "..." overflow menu already
+				// occupies the top-trailing corner of the profile screen.
+				[NSLayoutConstraint activateConstraints:@[
+					[[profilePictureButton trailingAnchor] constraintEqualToAnchor:profilePictureAnchor.trailingAnchor constant:-11.6],
+					[[profilePictureButton bottomAnchor] constraintEqualToAnchor:profilePictureAnchor.bottomAnchor constant:-11.6]
+				]];
+			}
+		}
+	}
+
+	// The post download button search/creation only ever needs to run for
+	// the actual home feed controller - see the comment on
+	// BeaDownloadButtonKey above for why letting every controller (including
+	// ancestors like MainTabBarController that contain the same content as a
+	// descendant) run this independently caused duplicate/incorrect buttons.
 	if (!isHomeController) return;
 
 	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
@@ -672,6 +736,37 @@ static BOOL BeaIsInterestingURL(NSURLRequest *request) {
 	return BeaURLIsInteresting(request.URL);
 }
 
+// Captured off GET /api/person/profiles/{userId}?withPost=true specifically
+// (seen firing whenever a friend's profile screen opens), not any response
+// containing a "profilePicture" field generally - the friends-list response
+// (/api/relationships/friends/) has one per friend in a whole array, and
+// capturing from there would grab an arbitrary friend's picture instead of
+// whichever profile is actually on screen. A single global "most recently
+// seen" value (not keyed by user) is enough since only one profile can
+// realistically be open at a time; cleared once consumed by a button (see
+// Tweak.x's viewDidLayoutSubviews) so a stale value can't silently reattach
+// to some later, unrelated single-image screen.
+static NSString *BeaLastCapturedProfilePictureURL;
+static NSTimeInterval BeaLastCapturedProfilePictureURLTimestamp;
+
+static void BeaCaptureProfilePictureURLIfPresent(NSURL *requestURL, NSData *body) {
+	if (body.length == 0) return;
+	if ([requestURL.path rangeOfString:@"/api/person/profiles/"].location == NSNotFound) return;
+
+	id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+	if (![json isKindOfClass:[NSDictionary class]]) return;
+
+	id profilePicture = ((NSDictionary *)json)[@"profilePicture"];
+	if (![profilePicture isKindOfClass:[NSDictionary class]]) return;
+
+	id urlValue = ((NSDictionary *)profilePicture)[@"url"];
+	if (![urlValue isKindOfClass:[NSString class]] || [(NSString *)urlValue length] == 0) return;
+
+	BeaLastCapturedProfilePictureURL = (NSString *)urlValue;
+	BeaLastCapturedProfilePictureURLTimestamp = [NSDate date].timeIntervalSince1970;
+	os_log(OS_LOG_DEFAULT, "[BeaNet] captured profile picture URL: %{public}@", BeaLastCapturedProfilePictureURL);
+}
+
 static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
 	NSData *body = explicitBody ?: request.HTTPBody;
 	NSString *bodyPreview = @"(no body)";
@@ -687,6 +782,7 @@ typedef void (^BeaNetworkCompletionBlock)(NSData *data, NSURLResponse *response,
 static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request, BeaNetworkCompletionBlock completionHandler) {
 	NSString *urlString = request.URL.absoluteString ?: @"";
 	NSString *method = request.HTTPMethod ?: @"GET";
+	NSURL *requestURL = request.URL;
 	return ^(NSData *data, NSURLResponse *response, NSError *error) {
 		NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
 		NSString *bodyPreview = @"(no data)";
@@ -696,6 +792,7 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 		}
 		os_log(OS_LOG_DEFAULT, "[BeaNet] <- %{public}@ %{public}@ status=%{public}ld body=%{public}@",
 			method, urlString, (long)httpResponse.statusCode, bodyPreview);
+		BeaCaptureProfilePictureURLIfPresent(requestURL, data);
 		completionHandler(data, response, error);
 	};
 }
@@ -845,6 +942,7 @@ static void BeaHookedDidComplete(id self, SEL _cmd, NSURLSession *session, NSURL
 			(long)httpResponse.statusCode,
 			error.localizedDescription ?: @"(none)",
 			bodyPreview);
+		BeaCaptureProfilePictureURLIfPresent(url, body);
 	}
 	IMP orig = BeaFindOriginalIMP(BeaOrigDidCompleteByClass, [self class]);
 	if (orig) ((BeaDidCompleteIMP)orig)(self, _cmd, session, task, error);

@@ -56,4 +56,16 @@
 // lets downloadImage: still find the right pair of photos despite the button
 // no longer living anywhere near them in the view tree.
 + (void)setSearchRoot:(UIView *)root forButton:(UIButton *)button;
+// Records which CDN URL downloadProfilePicture: should fetch when this button
+// is tapped - snapshotted at button-creation time rather than re-read at tap
+// time, since the "currently captured" profile picture URL is a single global
+// value that could otherwise have moved on to a different profile by the time
+// the user actually taps.
++ (void)setProfilePictureURLString:(NSString *)urlString forButton:(UIButton *)button;
+// Unlike downloadImage:, which saves whatever a UIImageView is already
+// displaying, this fetches the URL recorded via setProfilePictureURLString:
+// forButton: over the network - profile pictures aren't found by walking the
+// view hierarchy the way post photos are (see Tweak.x for why), only by a URL
+// captured out of a network response.
++ (void)downloadProfilePicture:(id)sender;
 @end

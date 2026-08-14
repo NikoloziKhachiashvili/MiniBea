@@ -3,6 +3,7 @@
 #import <os/log.h>
 
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
+static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
 
 // Tracks an in-flight save of one BeReal's images (front + back) so the
 // checkmark/re-enable only fires once, after every image has finished saving.
@@ -44,6 +45,38 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 		void *contextInfo = (void *)CFBridgingRetain(context);
 		UIImageWriteToSavedPhotosAlbum(imageView.image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
 	}
+}
+
++ (void)downloadProfilePicture:(id)sender {
+	UIButton *button = (UIButton *)sender;
+	NSString *urlString = objc_getAssociatedObject(button, BeaProfilePictureURLKey);
+	NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
+	if (!url) return;
+
+	button.enabled = NO;
+
+	BeaDownloadContext *context = [BeaDownloadContext new];
+	context.button = button;
+	context.remaining = 1;
+	context.failed = NO;
+
+	// Unlike downloadImage:, which saves a UIImageView's already-decoded
+	// .image, this has to actually fetch the CDN URL - there's no on-screen
+	// view guaranteed to already hold this bitmap (the profile screen's own
+	// image view was deliberately not used as the source, see the comment on
+	// BeaLastCapturedProfilePictureURL in Tweak.x).
+	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+		UIImage *image = data ? [UIImage imageWithData:data] : nil;
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (!image) {
+				context.button.enabled = YES;
+				return;
+			}
+			void *contextInfo = (void *)CFBridgingRetain(context);
+			UIImageWriteToSavedPhotosAlbum(image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
+		});
+	}];
+	[task resume];
 }
 
 + (BOOL)isViewOnScreen:(UIView *)view {
@@ -166,6 +199,10 @@ static const void *BeaSearchRootKey = &BeaSearchRootKey;
 
 + (void)setSearchRoot:(UIView *)root forButton:(UIButton *)button {
 	objc_setAssociatedObject(button, BeaSearchRootKey, root, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
++ (void)setProfilePictureURLString:(NSString *)urlString forButton:(UIButton *)button {
+	objc_setAssociatedObject(button, BeaProfilePictureURLKey, urlString, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 + (void)enableUserInteractionRecursivelyInView:(UIView *)view {
