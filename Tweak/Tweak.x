@@ -305,6 +305,13 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 static CADisplayLink *BeaVisibilityDisplayLink;
 static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 
+// Populated by BeaCaptureProfilePictureURLIfPresent, defined later in this
+// file alongside the rest of the [BeaNet] response-body capture machinery -
+// declared here instead since viewDidLayoutSubviews below reads them
+// directly and needs them in scope before that point.
+static NSString *BeaLastCapturedProfilePictureURL;
+static NSTimeInterval BeaLastCapturedProfilePictureURLTimestamp;
+
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
@@ -736,6 +743,10 @@ static BOOL BeaIsInterestingURL(NSURLRequest *request) {
 	return BeaURLIsInteresting(request.URL);
 }
 
+// BeaLastCapturedProfilePictureURL/Timestamp are declared earlier in this
+// file, right before %hook UIViewController - viewDidLayoutSubviews reads
+// them directly, and that hook comes before this function in the file.
+//
 // Captured off GET /api/person/profiles/{userId}?withPost=true specifically
 // (seen firing whenever a friend's profile screen opens), not any response
 // containing a "profilePicture" field generally - the friends-list response
@@ -746,9 +757,6 @@ static BOOL BeaIsInterestingURL(NSURLRequest *request) {
 // realistically be open at a time; cleared once consumed by a button (see
 // Tweak.x's viewDidLayoutSubviews) so a stale value can't silently reattach
 // to some later, unrelated single-image screen.
-static NSString *BeaLastCapturedProfilePictureURL;
-static NSTimeInterval BeaLastCapturedProfilePictureURLTimestamp;
-
 static void BeaCaptureProfilePictureURLIfPresent(NSURL *requestURL, NSData *body) {
 	if (body.length == 0) return;
 	if ([requestURL.path rangeOfString:@"/api/person/profiles/"].location == NSNotFound) return;
