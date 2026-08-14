@@ -41,8 +41,17 @@
 	// captured, and that's been working since early in this project), so it
 	// at least confirms which URLs are actually being called even without
 	// response bodies.
+	//
+	// Widened from "bereal.com/api/" to plain "bereal.com" - a real capture
+	// showed heavy feed/reaction/unblur activity but zero matching traffic
+	// under /api/, even though person/me, settings, and content/posts all
+	// did. The class survey found *ServiceAsyncClient classes (Relationships,
+	// Discovery), which is the naming convention gRPC/Connect-RPC codegen
+	// uses - those clients typically hit paths like
+	// /relationships.v1.RelationshipsService/Method on the same host, not
+	// /api/..., which would explain the total silence under the old filter.
 	NSString *urlString = self.URL.absoluteString ?: @"";
-	if ([urlString rangeOfString:@"bereal.com/api/"].location != NSNotFound) {
+	if ([urlString rangeOfString:@"bereal.com"].location != NSNotFound) {
 		os_log(OS_LOG_DEFAULT, "[BeaNet] request configured: %{public}@ %{public}@", self.HTTPMethod ?: @"GET", urlString);
 	}
 }
@@ -630,9 +639,12 @@ static void BeaSurveyClasses(void) {
 // tweak makes itself (BeaUploadTask already logs nothing of its own
 // responses either) - the only way to confirm what BeReal's feed-fetch
 // actually returns (reactions, retake count, full history, etc.) instead of
-// inferring it from the upload payload's schema. Scoped to bereal.com/api/
-// URLs only. Bodies truncated (not full multi-KB+ feed JSON) since this is
-// meant to reveal field *names* and rough shape, not capture complete data.
+// inferring it from the upload payload's schema. Scoped to any bereal.com
+// URL (not just /api/ - a real capture showed heavy feed/reaction traffic
+// producing zero matches under the old, narrower filter, most likely because
+// it uses gRPC/Connect-RPC-style paths on the same host instead). Bodies
+// truncated (not full multi-KB+ feed JSON) since this is meant to reveal
+// field *names* and rough shape, not capture complete data.
 //
 // Two entry points, not one - BeaUploadTask itself proves both are in real
 // use: dataTaskWithRequest:completionHandler: for its plain GETs
@@ -643,7 +655,7 @@ static void BeaSurveyClasses(void) {
 // itself, hence the explicit override below rather than always reading
 // request.HTTPBody.
 static BOOL BeaIsInterestingURL(NSURLRequest *request) {
-	return [request.URL.absoluteString rangeOfString:@"bereal.com/api/"].location != NSNotFound;
+	return [request.URL.absoluteString rangeOfString:@"bereal.com"].location != NSNotFound;
 }
 
 static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
@@ -697,7 +709,7 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 // regardless of which factory method created the task.
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
 	NSString *urlString = url.absoluteString ?: @"";
-	if (!completionHandler || [urlString rangeOfString:@"bereal.com/api/"].location == NSNotFound) {
+	if (!completionHandler || [urlString rangeOfString:@"bereal.com"].location == NSNotFound) {
 		return %orig;
 	}
 	os_log(OS_LOG_DEFAULT, "[BeaNet] -> GET %{public}@ body=(no body)", urlString);
@@ -719,7 +731,7 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 - (void)resume {
 	NSURL *url = self.currentRequest.URL ?: self.originalRequest.URL;
 	NSString *urlString = url.absoluteString ?: @"";
-	if ([urlString rangeOfString:@"bereal.com/api/"].location != NSNotFound) {
+	if ([urlString rangeOfString:@"bereal.com"].location != NSNotFound) {
 		NSString *method = self.currentRequest.HTTPMethod ?: self.originalRequest.HTTPMethod ?: @"GET";
 		os_log(OS_LOG_DEFAULT, "[BeaNet] task resumed: class=%{public}@ %{public}@ %{public}@",
 			NSStringFromClass([self class]), method, urlString);
